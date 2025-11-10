@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+SQLAlchemy
+alembic
+pymysql
+python-multipart
+passlib[bcrypt]
+PyJWT
+pydantic[email]
+pydantic-settings
+httpx
+motor
+pymongo
+jinja2
+weasyprint
+pdfminer.six
+python-dotenv

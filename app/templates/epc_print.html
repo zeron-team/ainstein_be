@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Epicrisis – {{ brand.hospital_nombre or '' }}</title>
+  <style>
+    @page { size: A4; margin: 20mm 15mm; }
+    body { font-family: DejaVu Sans, Arial, sans-serif; font-size: 12px; color: #111; }
+    header { position: fixed; top: -10mm; left: 0; right: 0; text-align: center; }
+    footer { position: fixed; bottom: -12mm; left: 0; right: 0; text-align: center; font-size: 10px; color: #444; }
+    .logo { height: 30px; vertical-align: middle; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    h2 { font-size: 14px; margin: 16px 0 6px; border-bottom: 1px solid #ddd; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+    .muted { color: #555; }
+    .box { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+    .mono { font-family: monospace; }
+  </style>
+</head>
+<body>
+  <header>
+    {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="logo" />{% endif %}
+    <div><strong>{{ brand.hospital_nombre or '' }}</strong></div>
+    <div class="muted">{{ brand.header_linea1 or '' }} {% if brand.header_linea2 %}– {{ brand.header_linea2 }}{% endif %}</div>
+  </header>
+
+  <footer>
+    {{ brand.footer_linea1 or '' }} {% if brand.footer_linea2 %}– {{ brand.footer_linea2 }}{% endif %}
+  </footer>
+
+  <main>
+    <h1>Epicrisis de Internación</h1>
+    <div class="grid box">
+      <div><strong>Paciente:</strong> {{ p.datos_paciente.apellido }}, {{ p.datos_paciente.nombre }}</div>
+      <div><strong>DNI:</strong> {{ p.datos_paciente.dni }}</div>
+      <div><strong>Obra Social:</strong> {{ p.datos_paciente.obra_social }}</div>
+      <div><strong>N° Beneficiario:</strong> {{ p.datos_paciente.nro_beneficiario }}</div>
+    </div>
+
+    <h2>Admisión</h2>
+    <div class="grid box">
+      <div><strong>Sector:</strong> {{ p.admision.sector }}</div>
+      <div><strong>Habitación/Cama:</strong> {{ p.admision.habitacion }}/{{ p.admision.cama }}</div>
+      <div><strong>Ingreso:</strong> {{ p.admision.fecha_ingreso }}</div>
+      <div><strong>Egreso:</strong> {{ p.admision.fecha_egreso }}</div>
+    </div>
+
+    <h2>Motivo de Internación</h2>
+    <div class="box">{{ p.motivo_internacion }}</div>
+
+    <h2>Diagnóstico Principal (CIE-10)</h2>
+    <div class="box mono">{{ p.diagnostico_principal_cie10 }}</div>
+
+    <h2>Evolución</h2>
+    <div class="box">{{ p.evolucion }}</div>
+
+    <h2>Procedimientos</h2>
+    <div class="box">
+      <ul>
+        {% for it in p.procedimientos %}<li>{{ it }}</li>{% endfor %}
+      </ul>
+    </div>
+
+    <h2>Interconsultas</h2>
+    <div class="box">
+      <ul>
+        {% for it in p.interconsultas %}<li>{{ it }}</li>{% endfor %}
+      </ul>
+    </div>
+
+    <h2>Medicación</h2>
+    <div class="box">
+      <ul>
+        {% for m in p.medicacion %}<li>{{ m.farmaco }} – {{ m.dosis }} – {{ m.via }} – {{ m.frecuencia }}</li>{% endfor %}
+      </ul>
+    </div>
+
+    <h2>Indicaciones al Alta</h2>
+    <div class="box">
+      <ul>
+        {% for it in p.indicaciones_alta %}<li>{{ it }}</li>{% endfor %}
+      </ul>
+    </div>
+
+    <h2>Recomendaciones</h2>
+    <div class="box">
+      <ul>
+        {% for it in p.recomendaciones %}<li>{{ it }}</li>{% endfor %}
+      </ul>
+    </div>
+
+    <h2>Observaciones</h2>
+    <div class="box">{{ p.observaciones }}</div>
+
+    <h2>Responsable</h2>
+    <div class="grid box">
+      <div><strong>Médico:</strong> {{ epc.medico_responsable or 'PENDIENTE' }}</div>
+      <div><strong>Fecha emisión:</strong> {{ epc.fecha_emision or '' }}</div>
+    </div>
+  </main>
+</body>
+</html>
