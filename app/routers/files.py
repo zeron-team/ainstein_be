@@ -1,3 +1,4 @@
+# backend/app/routers/files.py
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 import os, uuid
 from app.core.deps import role_required

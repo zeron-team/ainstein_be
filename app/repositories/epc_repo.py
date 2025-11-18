@@ -1,39 +1,64 @@
+from __future__ import annotations
+from typing import Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import select, desc
+from uuid import uuid4
 from app.domain.models import EPC
-from bson import ObjectId
+
 
 class EPCRepo:
-    def __init__(self, db: Session, mongo):
+    def __init__(self, db: Session):
         self.db = db
-        self.mongo = mongo
-        self.versions = mongo["epc_versions"]
 
-    async def upsert_draft(self, patient_id: str, admission_id: str | None, payload: dict, user_id: str) -> EPC:
-        import uuid
-        epc = self.db.query(EPC).filter(EPC.patient_id == patient_id).first()
-        if not epc:
-            epc = EPC(id=str(uuid.uuid4()), patient_id=patient_id, admission_id=admission_id,
-                      estado='borrador', created_by=user_id)
-            self.db.add(epc)
-            self.db.commit()
-            self.db.refresh(epc)
-        doc = {
-            "epc_id": epc.id,
-            "patient_id": patient_id,
-            "status": "draft",
-            "payload": payload,
-        }
-        ins = await self.versions.insert_one(doc)
-        epc.version_actual_oid = str(ins.inserted_id)
-        epc.estado = 'borrador'
+    # lecturas
+    def get(self, epc_id: str) -> Optional[EPC]:
+        return self.db.get(EPC, epc_id)
+
+    def get_by_patient_adm(self, patient_id: str, admission_id: Optional[str]) -> Optional[EPC]:
+        stmt = select(EPC).where(EPC.patient_id == patient_id)
+        if admission_id:
+            stmt = stmt.where(EPC.admission_id == admission_id)
+        else:
+            stmt = stmt.where(EPC.admission_id.is_(None))
+        stmt = stmt.order_by(desc(EPC.created_at)).limit(1)
+        return self.db.execute(stmt).scalars().first()
+
+    # escrituras
+    def create(self, *, patient_id: str, admission_id: Optional[str], created_by: str) -> EPC:
+        row = EPC(
+            id=str(uuid4()),
+            patient_id=patient_id,
+            admission_id=admission_id,
+            estado="borrador",
+            created_by=created_by,
+        )
+        self.db.add(row)
         self.db.commit()
-        return epc
+        self.db.refresh(row)
+        return row
 
-    async def get_with_latest_version(self, epc_id: str):
-        epc = self.db.query(EPC).get(epc_id)
-        if not epc:
-            return None, None
-        version = None
-        if epc.version_actual_oid:
-            version = await self.versions.find_one({"_id": ObjectId(epc.version_actual_oid)})
-        return epc, version
+    def update(self, epc_id: str, payload: dict) -> Optional[EPC]:
+        row = self.get(epc_id)
+        if not row:
+            return None
+        
+        for key, value in payload.items():
+            if hasattr(row, key):
+                setattr(row, key, value)
+        
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def update_generated(self, epc_id: str, *, version_oid: str,
+                         titulo: Optional[str], cie10: Optional[str]) -> EPC:
+        row = self.get(epc_id)
+        assert row, "EPC no encontrada"
+        row.version_actual_oid = version_oid
+        if titulo is not None:
+            row.titulo = titulo
+        if cie10 is not None:
+            row.diagnostico_principal_cie10 = cie10
+        self.db.commit()
+        self.db.refresh(row)
+        return row

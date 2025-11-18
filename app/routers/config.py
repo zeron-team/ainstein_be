@@ -1,3 +1,4 @@
+# backend/app/routers/config.py
 from fastapi import APIRouter, Depends
 from app.core.deps import get_db, role_required
 from app.repositories.branding_repo import BrandingRepo

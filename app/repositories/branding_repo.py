@@ -1,3 +1,4 @@
+# backend/app/repositories/branding_repo.py
 from sqlalchemy.orm import Session
 from app.domain.models import Branding
 

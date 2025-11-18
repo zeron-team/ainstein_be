@@ -1,18 +1,199 @@
-from fastapi import APIRouter, Depends
-import uuid
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
+from sqlalchemy.orm import Session
+from datetime import datetime
+from io import BytesIO
+from uuid import uuid4
+from starlette.concurrency import run_in_threadpool
+
 from app.core.deps import get_db, role_required
-from app.domain.models import Patient
-from app.domain.schemas import PatientIn
+from app.services.patient_service import PatientService
+from app.domain.schemas import PatientCreate, PatientOut, HceImportResponse
+from app.domain.enums import PatientEstado
 from app.repositories.patient_repo import PatientRepo
+from app.adapters.mongo_client import db as mongo
+from app.services.hce_parser import save_upload, extract_text_from_hce
+from app.services.ai_gemini_service import GeminiAIService
 
 router = APIRouter(prefix="/patients", tags=["Patients"])
 
-@router.post("")
-def create_patient(p: PatientIn, db=Depends(get_db), user=Depends(role_required('medico','admin'))):
-    model = Patient(id=str(uuid.uuid4()), apellido=p.apellido, nombre=p.nombre, dni=p.dni, obra_social=p.obra_social, nro_beneficiario=p.nro_beneficiario)
-    return PatientRepo(db).create(model)
+# ---------------------------
+# Listado con búsqueda, estado y paginación
+# ---------------------------
+@router.get("", dependencies=[Depends(role_required("admin", "medico"))])
+def list_patients(
+    q: str | None = None,
+    estado: str | None = Query(
+        default=None,
+        description="Filtra por estado del paciente: internacion | falta_epc | epc_generada | alta",
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    svc = PatientService(db)
+    return svc.list(q=q, estado=estado, page=page, page_size=page_size)
 
-@router.get("")
-def list_patients(estado: str | None = None, db=Depends(get_db), user=Depends(role_required('viewer','medico','admin'))):
-    res = PatientRepo(db).list(estado=estado)
-    return [{"patient": r[0].__dict__, "status": r[1].__dict__} for r in res]
+# ---------------------------
+# Get by ID
+# ---------------------------
+@router.get(
+    "/{patient_id}",
+    response_model=PatientOut,
+    dependencies=[Depends(role_required("admin", "medico"))],
+)
+def get_patient(patient_id: str, db: Session = Depends(get_db)):
+    svc = PatientService(db)
+    return svc.get_by_id(patient_id)
+
+# ---------------------------
+# Update
+# ---------------------------
+@router.put(
+    "/{patient_id}",
+    response_model=PatientOut,
+    dependencies=[Depends(role_required("admin"))],
+)
+def update_patient(patient_id: str, payload: PatientCreate, db: Session = Depends(get_db)):
+    svc = PatientService(db)
+    return svc.update(patient_id, payload.model_dump())
+
+# ---------------------------
+# Delete
+# ---------------------------
+@router.delete(
+    "/{patient_id}",
+    status_code=204,
+    dependencies=[Depends(role_required("admin"))],
+)
+def delete_patient(patient_id: str, db: Session = Depends(get_db)):
+    svc = PatientService(db)
+    svc.delete(patient_id)
+    return {"ok": True}
+
+# ---------------------------
+# Parse HCE (PDF) with AI
+# ---------------------------
+@router.post(
+    "/parse-hce",
+    dependencies=[Depends(role_required("admin", "medico"))],
+)
+async def parse_hce_for_patient_data(file: UploadFile = File(...)):
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(status_code=400, detail="Debe adjuntar un PDF")
+
+    try:
+        pdf_bytes = await file.read()
+        
+        # Guardar PDF temporalmente
+        tmp_name = f"HCE_{uuid4().hex}.pdf"
+        # Como save_upload y extract_text no son async, las corremos en un threadpool
+        path = await run_in_threadpool(save_upload, tmp_name, BytesIO(pdf_bytes))
+        text, _ = await run_in_threadpool(extract_text_from_hce, path)
+
+        # Usar IA para extraer datos
+        ai = GeminiAIService()
+        ai_extracted_data = await ai.extract_patient_data_from_hce(text)
+        
+        return ai_extracted_data
+
+    except Exception as e:
+        # log.error(f"Error parsing HCE file: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se pudo parsear el archivo PDF. Error: {e}",
+        )
+
+# ---------------------------
+# Alta manual
+# ---------------------------
+@router.post(
+    "",
+    response_model=PatientOut,
+    dependencies=[Depends(role_required("admin", "medico"))],
+)
+def create_patient_manual(payload: PatientCreate, db: Session = Depends(get_db)):
+    svc = PatientService(db)
+    patient, _ = svc.create_manual(payload.model_dump(), created_by="system")
+
+    # Estado inicial: internación
+    PatientRepo(db).upsert_status(
+        patient["id"],
+        estado=PatientEstado.internacion.value,
+        observaciones=None,
+    )
+
+    return patient
+
+# ---------------------------
+# Alta por HCE (PDF)
+# ---------------------------
+import logging
+
+log = logging.getLogger(__name__)
+
+@router.post(
+    "/import-hce",
+    response_model=HceImportResponse,
+    dependencies=[Depends(role_required("admin", "medico"))],
+)
+async def import_patient_from_hce(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    log.debug("Entering import_patient_from_hce endpoint.")
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(status_code=400, detail="Debe adjuntar un PDF")
+
+    try:
+        pdf_bytes = await file.read()
+        svc = PatientService(db)
+        patient, admission, text_preview, pages, source_filename = await svc.create_from_hce(
+            pdf_bytes,
+            created_by="system",
+        )
+
+        # Estado inicial: internación
+        PatientRepo(db).upsert_status(
+            patient["id"],
+            estado=PatientEstado.internacion.value,
+            observaciones=None,
+        )
+
+        # Aseguramos persistencia de la HCE en Mongo (id de admisión viene como dict en el service)
+        admission_id = admission.get("id") if isinstance(admission, dict) else getattr(admission, "id", None)
+
+        hce_doc = {
+            "patient_id": patient["id"],
+            "admission_id": admission_id,
+            "text": text_preview,          # preview; el full ya lo guarda el service; esto es ensure
+            "pages": pages,
+            "source_filename": source_filename,
+            "created_at": datetime.utcnow(),
+            "source": "upload",
+        }
+        await mongo.hce_docs.update_one(
+            {
+                "patient_id": hce_doc["patient_id"],
+                "admission_id": hce_doc["admission_id"],
+                "source_filename": source_filename,
+            },
+            {"$setOnInsert": hce_doc},
+            upsert=True,
+        )
+
+        return HceImportResponse(
+            status="created",
+            patient=patient,
+            admission=admission,
+            hce_text_preview=text_preview,
+            pages=pages,
+            source_filename=source_filename,
+            message="Paciente importado desde HCE",
+        )
+    except Exception as e:
+        # Log the full error for debugging
+        # log.error(f"Error processing HCE file: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se pudo procesar el archivo PDF. Error: {e}",
+        )

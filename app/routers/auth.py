@@ -1,3 +1,4 @@
+# backend/app/routers/auth.py
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from app.core.deps import get_db
