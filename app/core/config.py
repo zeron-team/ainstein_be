@@ -57,6 +57,23 @@ class Settings(BaseSettings):
     ENV: str = "dev"
     EPC_FALLBACK_ANY_HCE: bool = True  # habilita estrategia ANY en generate()
 
+    # Qdrant (Vector DB for RAG)
+    QDRANT_HOST: str = "localhost"
+    QDRANT_PORT: int = 6333
+    QDRANT_ENABLED: bool = False  # Activar cuando Qdrant esté corriendo
+
+    # RAG Settings
+    RAG_ENABLED: bool = False  # Activar para usar LangChain + RAG
+    RAG_FEW_SHOT_EXAMPLES: int = 3  # Cantidad de ejemplos para few-shot learning
+
+    # Ainstein / Markey WS
+    AINSTEIN_API_URL: str = "https://ainstein1.markeyoci.com.ar/obtener"
+    AINSTEIN_APP: str = "AInstein"
+    AINSTEIN_API_KEY: str = ""
+    AINSTEIN_TOKEN: str = ""
+    AINSTEIN_HTTP_METHOD: str = "GET"
+    AINSTEIN_TIMEOUT_SECONDS: int = 60
+
     def model_post_init(self, *_):
         self.CORS_ORIGINS = _parse_cors(self.CORS_ORIGINS)
 

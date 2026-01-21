@@ -1,8 +1,12 @@
+# app/repositories/epc_repo.py
+
 from __future__ import annotations
+
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc
 from uuid import uuid4
+
 from app.domain.models import EPC
 
 
@@ -41,17 +45,23 @@ class EPCRepo:
         row = self.get(epc_id)
         if not row:
             return None
-        
+
         for key, value in payload.items():
             if hasattr(row, key):
                 setattr(row, key, value)
-        
+
         self.db.commit()
         self.db.refresh(row)
         return row
 
-    def update_generated(self, epc_id: str, *, version_oid: str,
-                         titulo: Optional[str], cie10: Optional[str]) -> EPC:
+    def update_generated(
+        self,
+        epc_id: str,
+        *,
+        version_oid: str,
+        titulo: Optional[str],
+        cie10: Optional[str],
+    ) -> EPC:
         row = self.get(epc_id)
         assert row, "EPC no encontrada"
         row.version_actual_oid = version_oid

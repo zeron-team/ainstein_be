@@ -20,7 +20,7 @@ router = APIRouter(prefix="/patients", tags=["Patients"])
 # Listado con búsqueda, estado y paginación
 # ---------------------------
 @router.get("", dependencies=[Depends(role_required("admin", "medico"))])
-def list_patients(
+async def list_patients(
     q: str | None = None,
     estado: str | None = Query(
         default=None,
@@ -31,7 +31,36 @@ def list_patients(
     db: Session = Depends(get_db),
 ):
     svc = PatientService(db)
-    return svc.list(q=q, estado=estado, page=page, page_size=page_size)
+    result = svc.list(q=q, estado=estado, page=page, page_size=page_size)
+    
+    # Enriquecer con datos de EPC desde MongoDB
+    patient_ids = [item["id"] for item in result["items"]]
+    if patient_ids:
+        # Buscar la EPC más reciente para cada paciente
+        pipeline = [
+            {"$match": {"patient_id": {"$in": patient_ids}}},
+            {"$sort": {"created_at": -1}},
+            {"$group": {
+                "_id": "$patient_id",
+                "created_by": {"$first": "$created_by"},
+                "created_by_name": {"$first": "$created_by_name"},
+                "created_at": {"$first": "$created_at"},
+            }},
+        ]
+        epc_data = {}
+        async for doc in mongo.epc_docs.aggregate(pipeline):
+            epc_data[doc["_id"]] = {
+                "epc_created_by_name": doc.get("created_by_name"),
+                "epc_created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+            }
+        
+        # Agregar datos de EPC a cada paciente
+        for item in result["items"]:
+            epc_info = epc_data.get(item["id"], {})
+            item["epc_created_by_name"] = epc_info.get("epc_created_by_name")
+            item["epc_created_at"] = epc_info.get("epc_created_at")
+    
+    return result
 
 # ---------------------------
 # Get by ID

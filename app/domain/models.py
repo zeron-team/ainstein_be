@@ -3,6 +3,7 @@ from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, Bool
 from sqlalchemy.dialects.mysql import CHAR, TINYINT
 from sqlalchemy.sql import func, text
 from sqlalchemy.orm import relationship
+
 from app.db.base import Base
 
 
@@ -83,7 +84,7 @@ class Admission(Base):
     fecha_egreso = Column(DateTime)
     protocolo = Column(String(60))
     admision_num = Column(String(60))
-    # NUEVO CAMPO: estado de la admisión
+    # Estado de la admisión
     estado = Column(
         String(30),
         nullable=False,
@@ -101,17 +102,54 @@ class EPC(Base):
         nullable=False,
     )
     admission_id = Column(CHAR(36), ForeignKey("admissions.id"))
-    # Un solo campo estado, con default coherente
+
+    # Estado principal
     estado = Column(String(20), nullable=False, default="borrador")
+
+    # Metadatos simples
     version_actual_oid = Column(String(64))
     titulo = Column(String(255))
     diagnostico_principal_cie10 = Column(String(15))
     fecha_emision = Column(DateTime)
     medico_responsable = Column(String(120))
     firmado_por_medico = Column(Boolean, default=False)
+
     created_by = Column(CHAR(36), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, onupdate=func.now())
+
+    # Contenido editable (opcional en SQL, hoy lo estás manejando en Mongo)
+    motivo_internacion = Column(Text)
+    evolucion = Column(Text)
+    procedimientos = Column(Text)        # líneas separadas por \n
+    interconsultas = Column(Text)
+    medicacion = Column(Text)
+    indicaciones_alta = Column(Text)
+    recomendaciones = Column(Text)
+
+    # Auditoría de edición / regeneración
+    last_edited_by = Column(CHAR(36), ForeignKey("users.id"))
+    last_edited_at = Column(DateTime)
+    has_manual_changes = Column(Boolean, default=False)
+    regenerated_count = Column(Integer, server_default="0", nullable=False)
+
+    author = relationship("User", foreign_keys=[created_by])
+    last_editor = relationship("User", foreign_keys=[last_edited_by])
+
+
+class EPCEvent(Base):
+    """
+    Historial de acciones sobre una EPC (creación, generación IA, validación, etc.)
+    Se referencia por epc_id (UUID en texto, igual al _id en Mongo).
+    No se pone FK a la tabla epc para no acoplarse a que exista siempre el registro en SQL.
+    """
+    __tablename__ = "epc_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    epc_id = Column(CHAR(36), nullable=False)
+    at = Column(DateTime, server_default=func.now(), nullable=False)
+    by = Column(String(120))
+    action = Column(Text, nullable=False)
 
 
 class Branding(Base):

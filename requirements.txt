@@ -15,3 +15,11 @@ jinja2
 weasyprint
 pdfminer.six
 python-dotenv
+
+# LangChain ecosystem
+langchain>=0.1.0
+langchain-google-genai>=1.0.0
+langchain-community>=0.0.20
+
+# Vector DB for RAG (future)
+qdrant-client>=1.7.0

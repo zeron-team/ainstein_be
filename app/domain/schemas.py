@@ -1,18 +1,24 @@
 # app/domain/schemas.py
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional, List, Literal
+
 from pydantic import BaseModel, Field, ConfigDict
+
 
 # ---------------------------
 # Helpers
 # ---------------------------
+
 class Msg(BaseModel):
     message: str
+
 
 # ---------------------------
 # USERS / AUTH
 # ---------------------------
+
 class UserBase(BaseModel):
     username: str = Field(..., min_length=3, max_length=80)
     full_name: str = Field(..., min_length=1, max_length=120)
@@ -20,8 +26,10 @@ class UserBase(BaseModel):
     role: Literal["admin", "medico", "viewer"]
     model_config = ConfigDict(from_attributes=True)
 
+
 class UserCreate(UserBase):
     password: str = Field(..., min_length=6, max_length=128)
+
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
@@ -29,21 +37,26 @@ class UserUpdate(BaseModel):
     role: Optional[Literal["admin", "medico", "viewer"]] = None
     is_active: Optional[bool] = None
 
+
 class UserOut(UserBase):
     id: str
     is_active: bool = True
+
 
 class LoginRequest(BaseModel):
     username: str
     password: str
 
+
 class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
+
 # ---------------------------
 # PATIENTS
 # ---------------------------
+
 class PatientBase(BaseModel):
     apellido: str = Field(..., min_length=1, max_length=80)
     nombre: str = Field(..., min_length=1, max_length=80)
@@ -56,10 +69,13 @@ class PatientBase(BaseModel):
     telefono: Optional[str] = Field(default=None, max_length=40)
     email: Optional[str] = Field(default=None, max_length=120)
     domicilio: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)
+
 
 class PatientCreate(PatientBase):
     pass
+
 
 class PatientUpdate(BaseModel):
     apellido: Optional[str] = None
@@ -74,12 +90,15 @@ class PatientUpdate(BaseModel):
     email: Optional[str] = None
     domicilio: Optional[str] = None
 
+
 class PatientOut(PatientBase):
     id: str
+
 
 # ---------------------------
 # ADMISSIONS
 # ---------------------------
+
 class AdmissionBase(BaseModel):
     patient_id: str
     sector: Optional[str] = None
@@ -89,22 +108,28 @@ class AdmissionBase(BaseModel):
     fecha_egreso: Optional[str] = None
     protocolo: Optional[str] = None
     admision_num: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)
+
 
 class AdmissionCreate(AdmissionBase):
     pass
 
+
 class AdmissionOut(AdmissionBase):
     id: str
 
+
 # ---------------------------
-# EPC
+# EPC: generación y secciones
 # ---------------------------
+
 class EPCGenReq(BaseModel):
     patient_id: str
     admission_id: Optional[str] = None
     hce_text: Optional[str] = None
     extra_instructions: Optional[str] = None
+
 
 class EPCSectionMedicacion(BaseModel):
     farmaco: str
@@ -112,12 +137,14 @@ class EPCSectionMedicacion(BaseModel):
     via: Optional[str] = None
     frecuencia: Optional[str] = None
 
+
 class EPCUpdate(BaseModel):
     titulo: Optional[str] = None
     diagnostico_principal_cie10: Optional[str] = None
     fecha_emision: Optional[str] = None
     medico_responsable: Optional[str] = None
     firmado_por_medico: Optional[bool] = None
+
     motivo_internacion: Optional[str] = None
     evolucion: Optional[str] = None
     procedimientos: Optional[List[str]] = None
@@ -125,6 +152,7 @@ class EPCUpdate(BaseModel):
     medicacion: Optional[List[EPCSectionMedicacion]] = None
     indicaciones_alta: Optional[List[str]] = None
     recomendaciones: Optional[List[str]] = None
+
 
 class EPCOut(BaseModel):
     id: Optional[str] = None
@@ -136,6 +164,7 @@ class EPCOut(BaseModel):
     fecha_emision: Optional[str] = None
     medico_responsable: Optional[str] = None
     firmado_por_medico: Optional[bool] = None
+
     motivo_internacion: Optional[str] = None
     evolucion: Optional[str] = None
     procedimientos: Optional[List[str]] = None
@@ -143,21 +172,68 @@ class EPCOut(BaseModel):
     medicacion: Optional[List[EPCSectionMedicacion]] = None
     indicaciones_alta: Optional[List[str]] = None
     recomendaciones: Optional[List[str]] = None
+
+    # Auditoría
+    last_edited_by: Optional[str] = None
+    last_edited_by_name: Optional[str] = None
+    last_edited_at: Optional[datetime] = None
+    has_manual_changes: bool = False
+    regenerated_count: int = 0
+
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------
+# EPC: historial y contexto
+# ---------------------------
+
+class EPCEventOut(BaseModel):
+    at: datetime
+    by: Optional[str] = None
+    action: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DoctorOut(BaseModel):
+    id: str
+    full_name: str
+    username: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EPCContextOut(BaseModel):
+    epc: EPCOut | dict
+    patient: Optional[PatientOut] = None
+    admission: Optional[AdmissionOut] = None
+    demographics: Optional[dict] = None
+    hce: Optional[dict] = None
+    doctors: List[DoctorOut] = []
+    generated: Optional[dict] = None
+    clinical: Optional[dict] = None
+    history: List[EPCEventOut] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 # ---------------------------
 # KPI / Dashboard
 # ---------------------------
+
 class KPIItem(BaseModel):
     key: str
     value: int
 
+
 class KPIsOut(BaseModel):
     items: List[KPIItem] = []
+
 
 # ---------------------------
 # HCE -> Import / Parse
 # ---------------------------
+
 class HceImportResponse(BaseModel):
     status: Literal["created", "updated", "error"] = "created"
     patient: Optional[PatientOut] = None
@@ -166,15 +242,11 @@ class HceImportResponse(BaseModel):
     pages: Optional[int] = None
     source_filename: Optional[str] = None
     message: Optional[str] = None
-    
-    
+
+
 # ---------------------------
 # BRANDING / CONFIG
 # ---------------------------
-from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel
-from pydantic import ConfigDict
 
 class BrandingBase(BaseModel):
     hospital_nombre: Optional[str] = None
@@ -183,11 +255,14 @@ class BrandingBase(BaseModel):
     header_linea2: Optional[str] = None
     footer_linea1: Optional[str] = None
     footer_linea2: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)
+
 
 class BrandingIn(BrandingBase):
     """Payload de entrada para crear/actualizar branding."""
     pass
+
 
 class BrandingOut(BrandingBase):
     """Respuesta hacia el frontend."""

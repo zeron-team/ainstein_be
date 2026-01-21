@@ -1,11 +1,14 @@
 # app/repositories/user_repo.py
 from __future__ import annotations
+
 from typing import Optional, List
 from uuid import uuid4
+
 from sqlalchemy.orm import Session
 
 from app.domain.models import User, Role
 from app.core.security import hash_password
+
 
 class UserRepo:
     def __init__(self, db: Session):
@@ -25,14 +28,31 @@ class UserRepo:
             qry = qry.filter(User.username.like(like))
         return qry.order_by(User.username.asc()).limit(limit).all()
 
-    # ---------- CREATE / UPDATE ----------
-    def create(self, username: str, password: str, full_name: str, email: Optional[str], role_name: str, is_active: bool = True) -> User:
-        role = self.db.query(Role).filter(Role.name == role_name).first()
+    # ---------- helpers internos ----------
+    def _ensure_role(self, role_name: str) -> Role:
+        role = (
+            self.db.query(Role)
+            .filter(Role.name == role_name)
+            .first()
+        )
         if not role:
-            role = Role(id=1 if role_name == "admin" else None, name=role_name)
+            role = Role(name=role_name)
             self.db.add(role)
             self.db.commit()
             self.db.refresh(role)
+        return role
+
+    # ---------- CREATE / UPDATE / DELETE ----------
+    def create(
+        self,
+        username: str,
+        password: str,
+        full_name: str,
+        email: Optional[str],
+        role_name: str,
+        is_active: bool = True,
+    ) -> User:
+        role = self._ensure_role(role_name)
 
         u = User(
             id=str(uuid4()),
@@ -47,6 +67,37 @@ class UserRepo:
         self.db.commit()
         self.db.refresh(u)
         return u
+
+    def update(
+        self,
+        user: User,
+        *,
+        full_name: Optional[str] = None,
+        email: Optional[str] = None,
+        role_name: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> User:
+        if full_name is not None:
+            user.full_name = full_name
+        if email is not None:
+            user.email = email
+        if role_name is not None:
+            role = self._ensure_role(role_name)
+            user.role_id = role.id
+        if is_active is not None:
+            user.is_active = is_active
+
+        self.db.commit()
+        self.db.refresh(user)
+        return user
+
+    def delete(self, user_id: str) -> bool:
+        u = self.get(user_id)
+        if not u:
+            return False
+        self.db.delete(u)
+        self.db.commit()
+        return True
 
     def set_password(self, user_id: str, new_password: str):
         u = self.get(user_id)

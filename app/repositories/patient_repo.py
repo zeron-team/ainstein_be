@@ -144,6 +144,7 @@ class PatientRepo:
         - Filtro 'estado' matchea en ambos campos (para compatibilidad).
         - Además trae info de la última admisión del paciente (admissions):
           admision_num, sector, habitacion, cama.
+        - Los datos de EPC (created_by_name, created_at) se enriquecen desde MongoDB en el router.
         """
 
         # Subquery para obtener la ÚLTIMA admisión por paciente
@@ -223,6 +224,9 @@ class PatientRepo:
                     "habitacion": habitacion,
                     "cama": cama,
                     "estado": est_final,
+                    # Estos campos se enriquecen desde MongoDB en el router
+                    "epc_created_by_name": None,
+                    "epc_created_at": None,
                 }
             )
         return out

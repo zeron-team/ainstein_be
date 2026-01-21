@@ -169,6 +169,27 @@ class GeminiAIService:
                 resp.raise_for_status()
                 data = resp.json()
                 text = _extract_text(data)
+                
+                # Trackear uso de tokens y costo
+                try:
+                    from app.services.llm_usage_tracker import get_llm_usage_tracker
+                    tracker = get_llm_usage_tracker()
+                    
+                    # Estimar tokens (1 token ≈ 4 caracteres)
+                    input_tokens = len(prompt) // 4
+                    output_tokens = len(text) // 4
+                    
+                    import asyncio
+                    asyncio.create_task(tracker.track_usage(
+                        operation_type="epc_generation",
+                        model=mdl,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        metadata={"want_json": want_json},
+                    ))
+                    log.info("[GeminiAI] Tracked %d input + %d output tokens", input_tokens, output_tokens)
+                except Exception as track_err:
+                    log.warning("[GeminiAI] Failed to track usage: %s", track_err)
 
                 if want_json:
                     parsed = _safe_json(text)

@@ -8,15 +8,18 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.domain.models import Patient, EPC
-from app.repositories.patient_repo import PatientRepo
+from app.repositories.patient_repo import PatientRepo  # por si lo necesitás en otros métodos
+import logging
+
+log = logging.getLogger(__name__)
 
 
 class KPIRepo:
     """
-    Repositorio de KPIs para el dashboard clínico.
+    Repositorio de KPIs para el dashboard.
 
-    - Usa PatientRepo.count_by_estado() para la distribución de estados
-      (internacion, falta_epc, epc_generada, alta).
+    - Usa directamente patients.estado para la distribución de estados
+      (internacion, falta_epc, epc_generada, alta, etc.).
     - Usa la tabla EPC para contar epicrisis generadas (hoy, mes actual, totales).
     """
 
@@ -24,19 +27,54 @@ class KPIRepo:
         self.db = db
 
     # ------------------------------------------------------------------
+    # Helpers internos
+    # ------------------------------------------------------------------
+    def _count_by_estado(self) -> Dict[str, int]:
+        """
+        Devuelve un dict {estado: cantidad} agrupando por patients.estado.
+        """
+        rows = (
+            self.db.query(Patient.estado, func.count(Patient.id))
+            .group_by(Patient.estado)
+            .all()
+        )
+
+        dist: Dict[str, int] = {}
+        for estado, cnt in rows:
+            key = (estado or "").strip() or "sin_estado"
+            dist[key] = int(cnt or 0)
+
+        log.info("[KPIRepo] Distribución de estados: %s", dist)
+        return dist
+
+    # ------------------------------------------------------------------
     # KPIs principales para el dashboard
     # ------------------------------------------------------------------
     def kpis(self) -> Dict:
         # Total de pacientes activos (tabla patients)
-        total_pacientes = int(self.db.query(func.count(Patient.id)).scalar() or 0)
+        total_pacientes = int(
+            self.db.query(func.count(Patient.id)).scalar() or 0
+        )
 
-        # Distribución de estados lógicos
-        # (usa patients.estado como fuente de verdad, con fallback a patient_status)
-        dist_estados = PatientRepo(self.db).count_by_estado()
+        # Distribución de estados (directo desde patients.estado)
+        dist_estados = self._count_by_estado()
+
         internacion = dist_estados.get("internacion", 0)
         falta_epc = dist_estados.get("falta_epc", 0)
-        epc_generada = dist_estados.get("epc_generada", 0)
+        epc_generada_pacientes = dist_estados.get("epc_generada", 0)
         alta = dist_estados.get("alta", 0)
+
+        # Objeto exactamente como lo espera el front: data.pacientes_por_estado
+        pacientes_por_estado: Dict[str, int] = {
+            "internacion": internacion,
+            "falta_epc": falta_epc,
+            "epc_generada": epc_generada_pacientes,
+            "alta": alta,
+        }
+        # Incluimos cualquier otro estado adicional que pueda aparecer
+        for k, v in dist_estados.items():
+            if k not in pacientes_por_estado:
+                pacientes_por_estado[k] = v
 
         # Ocupación (porcentaje de pacientes internados sobre el total)
         ocupacion_pct = (
@@ -45,18 +83,19 @@ class KPIRepo:
             else 0.0
         )
 
-        # ------------------------------------------------------------------
-        # KPIs de Epicrisis (tabla EPC)
-        # ------------------------------------------------------------------
+        # KPIs de epicrisis (tabla EPC)
         hoy = date.today()
         inicio_mes = hoy.replace(day=1)
 
-        # Usamos created_at como fecha básica; si luego usás fecha_emision
-        # y es un Date/DateTime, se puede hacer coalesce.
-        fecha_col = func.date(func.coalesce(EPC.fecha_emision, EPC.created_at))
+        # Total de EPC registradas en tabla EPC
+        total_epc = int(
+            self.db.query(func.count(EPC.id)).scalar() or 0
+        )
 
-        # Total de EPC generadas (todas las filas en EPC)
-        total_epc = int(self.db.query(func.count(EPC.id)).scalar() or 0)
+        # Columna de fecha para agrupar/filtrar: preferimos fecha_emision, si no, created_at
+        fecha_col = func.date(
+            func.coalesce(EPC.fecha_emision, EPC.created_at)
+        )
 
         # EPC generadas hoy
         epc_hoy = int(
@@ -66,8 +105,8 @@ class KPIRepo:
             or 0
         )
 
-        # EPC generadas en el mes actual (month-to-date)
-        epc_mtd = int(
+        # EPC generadas en el mes actual (desde el 1 del mes hasta hoy)
+        epc_mes_actual = int(
             self.db.query(func.count(EPC.id))
             .filter(fecha_col >= inicio_mes)
             .filter(fecha_col <= hoy)
@@ -75,35 +114,67 @@ class KPIRepo:
             or 0
         )
 
-        # ------------------------------------------------------------------
-        # Estructura EXACTA que espera el frontend (Dashboard.tsx)
-        # ------------------------------------------------------------------
+        # Log para ver rápidamente qué está devolviendo
+        log.info(
+            "[KPIRepo] KPIs calculados | total_pacientes=%s, internacion=%s, "
+            "falta_epc=%s, epc_generada_pacientes=%s, alta=%s, "
+            "total_epc=%s, epc_hoy=%s, epc_mes_actual=%s",
+            total_pacientes,
+            internacion,
+            falta_epc,
+            epc_generada_pacientes,
+            alta,
+            total_epc,
+            epc_hoy,
+            epc_mes_actual,
+        )
+
+        # Devolvemos varias keys “amigables” y alias para no romper el front
         return {
-            # Totales
+            # Totales de pacientes
+            "pacientes_totales": total_pacientes,
             "total_pacientes": total_pacientes,
 
-            # Distribución por estado para las cards y el gráfico
-            "pacientes_por_estado": {
-                "internacion": internacion,
-                "falta_epc": falta_epc,
-                "epc_generada": epc_generada,
-                "alta": alta,
-            },
+            # 👈 EXACTO como lo espera el Dashboard
+            "pacientes_por_estado": pacientes_por_estado,
 
-            # Para compatibilidad / posibles usos futuros
-            "pacientes_totales": total_pacientes,
-            "distribucion_estados": dist_estados,
-            "estado_counts": dist_estados,
+            # Distribución por estado (cards principales, alias antiguos)
             "internacion": internacion,
+            "pacientes_internacion": internacion,
+
             "falta_epc": falta_epc,
-            "epc_generadas": epc_generada,
+            "pacientes_falta_epc": falta_epc,
+
+            # Pacientes con EPC generada (usa patients.estado = 'epc_generada')
+            "epc_generadas": epc_generada_pacientes,
+            "pacientes_epc_generadas": epc_generada_pacientes,
+            "epc_generadas_pacientes": epc_generada_pacientes,
+            "total_pacientes_epc_generada": epc_generada_pacientes,
+
             "altas": alta,
+            "pacientes_alta": alta,
+
+            # Porcentaje de ocupación (para Internación)
             "internacion_ocupacion_pct": ocupacion_pct,
 
-            # EPC: hoy y mes en curso (MTD)
+            # EPC (hoy, mes, total) desde tabla EPC
             "epc_totales": total_epc,
+            "epc_total": total_epc,
+            "total_epc": total_epc,
+
             "epc_hoy": epc_hoy,
-            "epc_mtd": epc_mtd,
+            "epc_dia": epc_hoy,
+            "epc_today": epc_hoy,
+
+            # 👈 alias EXACTO para el front: epc_mtd
+            "epc_mes_actual": epc_mes_actual,
+            "epc_mes": epc_mes_actual,
+            "epc_mes_en_curso": epc_mes_actual,
+            "epc_mtd": epc_mes_actual,
+
+            # Distribución completa (para gráfica “Distribución por estado”)
+            "distribucion_estados": dist_estados,
+            "estado_counts": dist_estados,
         }
 
     # ------------------------------------------------------------------
@@ -113,7 +184,9 @@ class KPIRepo:
         hoy = date.today()
         inicio_mes = hoy.replace(day=1)
 
-        fecha_col = func.date(func.coalesce(EPC.fecha_emision, EPC.created_at))
+        fecha_col = func.date(
+            func.coalesce(EPC.fecha_emision, EPC.created_at)
+        )
 
         rows = (
             self.db.query(
@@ -155,12 +228,12 @@ class KPIRepo:
             .all()
         )
 
-        # Últimos 12 registros
+        # Nos quedamos con los últimos 12 registros
         rows = rows[-12:]
 
         series: List[Dict] = []
         for anio, mes, total in rows:
-            label = f"{int(anio):04d}-{int(mes):02d}"  # YYYY-MM
+            label = f"{int(anio):04d}-{int(mes):02d}"
             series.append(
                 {
                     "month": label,

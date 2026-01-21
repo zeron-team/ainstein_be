@@ -1,3 +1,5 @@
+# backend/app/services/epc_service.py
+
 from __future__ import annotations
 
 import logging
@@ -20,6 +22,14 @@ from app.domain.schemas import EPCOut
 from app.adapters.mongo_client import db as mongo
 from app.adapters.mongo_client import pick_hce_collections
 from app.services.ai_gemini_service import GeminiAIService
+from app.core.config import settings
+
+# RAG Service for advanced generation with embeddings
+try:
+    from app.services.rag_service import RAGService, generate_epc_smart
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
 
 try:
     from app.domain.models import Patient as PatientModel  # type: ignore
@@ -87,6 +97,77 @@ class EPCService:
             recomendaciones=None,
         )
 
+    # ========================= TEXTO HCE =========================
+    @staticmethod
+    def _pick_best_hce_text(doc: Dict[str, Any]) -> str:
+        if not doc:
+            return ""
+        if isinstance(doc.get("text"), str) and doc["text"].strip():
+            return doc["text"]
+
+        structured = doc.get("structured") or {}
+        if isinstance(structured, dict):
+            for key in ("texto_completo", "texto", "descripcion"):
+                val = structured.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val
+
+        if isinstance(doc.get("raw_text"), str) and doc["raw_text"].strip():
+            return doc["raw_text"]
+
+        for k in ("content", "body", "contenido"):
+            v = doc.get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+
+        return ""
+
+    @classmethod
+    def _extract_hce_text(cls, hce_doc: Dict[str, Any]) -> str:
+        base = cls._pick_best_hce_text(hce_doc)
+        if base:
+            return base
+
+        parts: List[str] = []
+        fields = [
+            "motivo_internacion",
+            "evolucion",
+            "impresion_diagnostica",
+            "diagnostico_principal",
+            "diagnosticos_secundarios",
+            "interconsultas",
+            "procedimientos",
+            "medicacion",
+        ]
+        structured = hce_doc.get("structured") or {}
+        if isinstance(structured, dict):
+            for f in fields:
+                val = structured.get(f)
+                if isinstance(val, str):
+                    parts.append(val)
+                elif isinstance(val, list):
+                    parts.extend(str(v) for v in val if v)
+        return "\n\n".join(p for p in parts if p).strip()
+
+    @staticmethod
+    def _rx_ci(val: str) -> Dict[str, Any]:
+        esc = re.escape(val)
+        esc = re.sub(r"\\\s+", r"\\s+", esc)
+        return {"$regex": esc, "$options": "i"}
+
+    @staticmethod
+    def _uuid_variants(u: Optional[str]) -> List[Any]:
+        out: List[Any] = []
+        if not u:
+            return out
+        out.append(u)
+        try:
+            _uuid = UUID(u)
+            out.append(Binary(_uuid.bytes, UUID_SUBTYPE))
+        except Exception:
+            pass
+        return out
+
     # ========================= LOOKUP DE HCE =========================
     def _get_patient_safe(self, patient_id: str):
         try:
@@ -102,29 +183,19 @@ class EPCService:
                 return None
         return None
 
-    @staticmethod
-    def _rx_ci(val: str) -> Dict[str, Any]:
-        esc = re.escape(val)
-        esc = re.sub(r"\\\s+", r"\\s+", esc)
-        return {"$regex": esc, "$options": "i"}
-
-    @staticmethod
-    def _uuid_variants(u: str) -> List[Any]:
-        out: List[Any] = [u]
-        try:
-            _uuid = UUID(u)
-            out.append(Binary(_uuid.bytes, UUID_SUBTYPE))
-        except Exception:
-            pass
-        return out
-
     async def _fetch_latest_hce(self, *, patient_id: str, admission_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """
+        IMPORTANTE:
+        - Evita devolver HCE "genérica" o de otro paciente.
+        - Evita fallback global "sin asignar" fuera de ventana.
+        - Requiere texto útil mínimo para que la IA no 'invente'.
+        """
         collections = await pick_hce_collections()
 
         patient_variants = self._uuid_variants(patient_id)
         adm_variants = self._uuid_variants(admission_id) if admission_id else []
 
-        window_minutes = 20
+        window_minutes = int(getattr(settings, "EPC_HCE_LOOKBACK_MINUTES", 60))
         now_utc = datetime.utcnow()
         window_start = now_utc - timedelta(minutes=window_minutes)
         recent_by_oid = {"_id": {"$gte": ObjectId.from_datetime(window_start)}}
@@ -136,10 +207,15 @@ class EPCService:
         apellido = (getattr(patient, "apellido", None) or "").strip()
         nombre = (getattr(patient, "nombre", None) or "").strip()
 
+        def _has_text(doc: Dict[str, Any]) -> bool:
+            txt = self._extract_hce_text(doc) or ""
+            min_chars = int(getattr(settings, "EPC_HCE_MIN_TEXT_CHARS", 80))
+            return len(txt.strip()) >= min_chars
+
         def _log_try(coll_name: str, title: str, filt: Dict[str, Any]) -> None:
             log.debug("[HCE-LOOKUP] %s [%s] = %s", title, coll_name, filt)
 
-        # A) por IDs
+        # A) por IDs (con campos alternativos)
         for coll in collections:
             or_terms: List[Dict[str, Any]] = []
             for v in patient_variants:
@@ -150,17 +226,25 @@ class EPCService:
                     {"paciente_id": v},
                     {"paciente.id": v},
                 ]
+
+            and_terms: List[Dict[str, Any]] = [{"$or": or_terms}]
+
             if adm_variants:
+                adm_or: List[Dict[str, Any]] = []
                 for av in adm_variants:
-                    or_terms += [
+                    adm_or += [
                         {"admission_id": av},
                         {"admission.id": av},
                         {"admision_id": av},
+                        {"admision.id": av},
+                        {"admissionId": av},
                     ]
-            filt_a: Dict[str, Any] = {"$or": or_terms}
-            _log_try(coll.name, "A (patient/admission)", filt_a)
+                and_terms.append({"$or": adm_or})
+
+            filt_a: Dict[str, Any] = {"$and": and_terms}
+            _log_try(coll.name, "A (patient/admission robust)", filt_a)
             doc = await coll.find_one(filt_a, sort=[("created_at", -1), ("_id", -1)])
-            if doc:
+            if doc and _has_text(doc):
                 return doc
 
         # B) por DNI/CUIL
@@ -178,12 +262,12 @@ class EPCService:
                     if not doc.get("patient_id"):
                         await coll.update_one({"_id": doc["_id"]}, {"$set": {"patient_id": patient_id}})
                         doc = await coll.find_one({"_id": doc["_id"]})
-                    return doc
+                    if doc and _has_text(doc):
+                        return doc
 
-        # C1) apellido/nombre con ventana
+        # C) apellido/nombre (ventana) - solo si hay texto (evita matches vacíos)
         if apellido or nombre:
             for coll in collections:
-                # $text si existe índice
                 try:
                     if apellido and nombre:
                         filt_c1 = {"$and": [recent_or_created, {"$text": {"$search": f"\"{apellido}\" \"{nombre}\""}}]}
@@ -196,14 +280,13 @@ class EPCService:
                 except OperationFailure:
                     doc = None
 
-                # regex fallback
                 if not doc:
-                    and_terms: List[Dict[str, Any]] = [recent_or_created]
+                    and_terms_rx: List[Dict[str, Any]] = [recent_or_created]
                     if apellido:
-                        and_terms.append({"text": self._rx_ci(apellido)})
+                        and_terms_rx.append({"text": self._rx_ci(apellido)})
                     if nombre:
-                        and_terms.append({"text": self._rx_ci(nombre)})
-                    filt_c1_rx = {"$and": and_terms}
+                        and_terms_rx.append({"text": self._rx_ci(nombre)})
+                    filt_c1_rx = {"$and": and_terms_rx}
                     _log_try(coll.name, "C1/regex", filt_c1_rx)
                     doc = await coll.find_one(filt_c1_rx, sort=[("created_at", -1), ("_id", -1)])
 
@@ -211,68 +294,32 @@ class EPCService:
                     if not doc.get("patient_id"):
                         await coll.update_one({"_id": doc["_id"]}, {"$set": {"patient_id": patient_id}})
                         doc = await coll.find_one({"_id": doc["_id"]})
-                    return doc
+                    if doc and _has_text(doc):
+                        return doc
 
-            # C2) sin ventana
+        # D) fallback "sin asignar" SOLO EN VENTANA (evita tomar la última HCE de otro)
+        allow_unassigned = bool(getattr(settings, "EPC_WS_FALLBACK_UNASSIGNED", False))
+        if allow_unassigned:
             for coll in collections:
-                try:
-                    if apellido and nombre:
-                        filt_c2 = {"$text": {"$search": f"\"{apellido}\" \"{nombre}\""}}
-                    elif apellido:
-                        filt_c2 = {"$text": {"$search": f"\"{apellido}\""}}
-                    else:
-                        filt_c2 = {"$text": {"$search": f"\"{nombre}\""}}
-                    _log_try(coll.name, "C2/$text", filt_c2)
-                    doc = await coll.find_one(filt_c2, sort=[("created_at", -1), ("_id", -1)])
-                except OperationFailure:
-                    doc = None
-
-                if not doc:
-                    and_terms_rx: List[Dict[str, Any]] = []
-                    if apellido:
-                        and_terms_rx.append({"text": self._rx_ci(apellido)})
-                    if nombre:
-                        and_terms_rx.append({"text": self._rx_ci(nombre)})
-                    filt_c2_rx = {"$and": and_terms_rx} if and_terms_rx else {}
-                    _log_try(coll.name, "C2/regex", filt_c2_rx)
-                    doc = await coll.find_one(filt_c2_rx, sort=[("created_at", -1), ("_id", -1)])
-
+                filt_d1 = {
+                    "$and": [
+                        recent_or_created,
+                        {
+                            "$or": [
+                                {"patient_id": {"$exists": False}},
+                                {"patient_id": ""},
+                                {"patient_id": None},
+                            ]
+                        },
+                    ]
+                }
+                _log_try(coll.name, "D1 (sin asignar + ventana)", filt_d1)
+                doc = await coll.find_one(filt_d1, sort=[("created_at", -1), ("_id", -1)])
                 if doc:
-                    if not doc.get("patient_id"):
-                        await coll.update_one({"_id": doc["_id"]}, {"$set": {"patient_id": patient_id}})
-                        doc = await coll.find_one({"_id": doc["_id"]})
-                    return doc
-
-        # D1) sin asignar + ventana
-        for coll in collections:
-            filt_d1 = {"$and": [recent_or_created, {"$or": [{"patient_id": {"$exists": False}}, {"patient_id": ""}, {"patient_id": None}]}]}
-            _log_try(coll.name, "D1 (sin asignar + ventana)", filt_d1)
-            doc = await coll.find_one(filt_d1, sort=[("created_at", -1), ("_id", -1)])
-            if doc:
-                await coll.update_one({"_id": doc["_id"]}, {"$set": {"patient_id": patient_id}})
-                doc = await coll.find_one({"_id": doc["_id"]})
-                return doc
-
-        # D2) sin asignar global
-        for coll in collections:
-            filt_d2 = {"$or": [{"patient_id": {"$exists": False}}, {"patient_id": ""}, {"patient_id": None}]}
-            _log_try(coll.name, "D2 (sin asignar global)", filt_d2)
-            doc = await coll.find_one(filt_d2, sort=[("_id", -1)])
-            if doc:
-                await coll.update_one({"_id": doc["_id"]}, {"$set": {"patient_id": patient_id}})
-                doc = await coll.find_one({"_id": doc["_id"]})
-                return doc
-
-        # E) Fallback ventana por _id
-        for coll in collections:
-            filt_e = {"_id": {"$gte": ObjectId.from_datetime(window_start)}}
-            _log_try(coll.name, "E (fallback ventana por _id)", filt_e)
-            doc = await coll.find_one(filt_e, sort=[("_id", -1)])
-            if doc:
-                await coll.update_one({"_id": doc["_id"]}, {"$set": {"patient_id": patient_id}})
-                doc = await coll.find_one({"_id": doc["_id"]})
-                log.debug("[HCE-LOOKUP] Fallback E usado en '%s': se vinculó la HCE más reciente en ventana.", coll.name)
-                return doc
+                    await coll.update_one({"_id": doc["_id"]}, {"$set": {"patient_id": patient_id}})
+                    doc = await coll.find_one({"_id": doc["_id"]})
+                    if doc and _has_text(doc):
+                        return doc
 
         return None
 
@@ -289,20 +336,51 @@ class EPCService:
         if not hce:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=("No se encontró HCE vinculable para este paciente pese a intentar por "
-                        "patient_id (texto/Binary), dni/cuil, nombre+apellido (ventana 20m), "
-                        "HCE sin asignar y fallback por _id. "
-                        "Reintente importar la HCE o verifique los datos del paciente.")
+                detail=(
+                    "No se encontró HCE vinculable para este paciente. "
+                    "Verifique que la ingesta del WS guarde patient_id o dni/cuil, "
+                    "y que exista texto clínico real (no vacío)."
+                ),
             )
 
-        hce_text: str = hce.get("text") or ""
-        pages: int = hce.get("pages") or 0
+        hce_text: str = self._extract_hce_text(hce) or ""
+        pages: int = int(hce.get("pages") or 0)
+
+        min_chars = int(getattr(settings, "EPC_HCE_MIN_TEXT_CHARS", 80))
+        if len(hce_text.strip()) < min_chars:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"HCE encontrada pero sin texto clínico útil (len={len(hce_text.strip())}, min={min_chars}). "
+                    "Se bloquea generación para evitar EPC 'inventada'."
+                ),
+            )
 
         prompt = self._build_prompt(hce_text=hce_text, pages=pages)
 
-        ai = GeminiAIService()
-        content = await ai.generate_epc(prompt)
+        # ✅ Use RAG service when enabled, fallback to legacy
+        use_rag = RAG_AVAILABLE and getattr(settings, 'RAG_ENABLED', False)
+        
+        if use_rag:
+            log.info("[EPCService.generate] Using RAG service with embeddings")
+            try:
+                content = await generate_epc_smart(
+                    hce_text=hce_text,
+                    patient_id=row.patient_id,
+                    pages=pages,
+                    use_rag=True,
+                    fallback_to_legacy=True,
+                )
+            except Exception as e:
+                log.warning("[EPCService.generate] RAG failed, using legacy: %s", e)
+                ai = GeminiAIService()
+                content = await ai.generate_epc(prompt)
+        else:
+            log.info("[EPCService.generate] Using legacy GeminiAIService")
+            ai = GeminiAIService()
+            content = await ai.generate_epc(prompt)
 
+        # ✅ CORRECCIÓN: versiones van a epc_versions (no epc_docs)
         version_doc = {
             "epc_id": row.id,
             "patient_id": row.patient_id,
@@ -311,7 +389,7 @@ class EPCService:
             "generated_at": datetime.utcnow(),
             "content": content,
         }
-        ins = await mongo.epc_docs.insert_one(version_doc)
+        ins = await mongo.epc_versions.insert_one(version_doc)
 
         row.version_actual_oid = str(ins.inserted_id)
         row.estado = "validada"
@@ -319,14 +397,26 @@ class EPCService:
         self.db.commit()
 
         try:
-            self.patient_repo.upsert_status(row.patient_id, estado=PatientEstado.epc_generada.value, observaciones=None)
+            self.patient_repo.upsert_status(
+                row.patient_id,
+                estado=PatientEstado.epc_generada.value,
+                observaciones=None,
+            )
         except Exception as e:
             log.warning("No se pudo actualizar estado del paciente: %s", e)
 
-        return {"id": row.id, "estado": row.estado, "version_actual_oid": row.version_actual_oid, "content": content}
+        return {
+            "id": row.id,
+            "estado": row.estado,
+            "version_actual_oid": row.version_actual_oid,
+            "content": content,
+        }
 
     async def get_latest_content(self, *, epc_id: str) -> Dict[str, Any]:
-        doc = await mongo.epc_docs.find_one({"epc_id": epc_id}, sort=[("generated_at", -1), ("_id", -1)])
+        doc = await mongo.epc_versions.find_one(
+            {"epc_id": epc_id},
+            sort=[("generated_at", -1), ("_id", -1)],
+        )
         if not doc:
             raise HTTPException(status_code=404, detail="Sin contenido generado para esta EPC")
         return {
@@ -337,14 +427,16 @@ class EPCService:
         }
 
     async def list_versions(self, *, epc_id: str) -> List[Dict[str, Any]]:
-        cur = mongo.epc_docs.find({"epc_id": epc_id}).sort([("generated_at", -1), ("_id", -1)])
+        cur = mongo.epc_versions.find({"epc_id": epc_id}).sort([("generated_at", -1), ("_id", -1)])
         out: List[Dict[str, Any]] = []
         async for d in cur:
-            out.append({
-                "id": str(d.get("_id")),
-                "source_hce_id": (str(d.get("source_hce_id")) if d.get("source_hce_id") else None),
-                "generated_at": (d.get("generated_at").isoformat() + "Z") if d.get("generated_at") else None,
-            })
+            out.append(
+                {
+                    "id": str(d.get("_id")),
+                    "source_hce_id": (str(d.get("source_hce_id")) if d.get("source_hce_id") else None),
+                    "generated_at": (d.get("generated_at").isoformat() + "Z") if d.get("generated_at") else None,
+                }
+            )
         return out
 
     @staticmethod
