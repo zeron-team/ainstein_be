@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     MONGO_URL: str
     MONGO_DB_NAME: str | None = None  # opcional (si no viene, se infiere del URL)
 
+    # Redis (Dopamine Layer - Caching)
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     # Auth
     JWT_SECRET: str
     JWT_EXPIRE_MINUTES: int = 60
@@ -57,13 +60,13 @@ class Settings(BaseSettings):
     ENV: str = "dev"
     EPC_FALLBACK_ANY_HCE: bool = True  # habilita estrategia ANY en generate()
 
-    # Qdrant (Vector DB for RAG)
+    # Qdrant (Vector DB for RAG - Semantic Layer)
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
-    QDRANT_ENABLED: bool = False  # Activar cuando Qdrant esté corriendo
+    QDRANT_ENABLED: bool = True  # FERRO Protocol enabled
 
     # RAG Settings
-    RAG_ENABLED: bool = False  # Activar para usar LangChain + RAG
+    RAG_ENABLED: bool = True  # FERRO Protocol enabled
     RAG_FEW_SHOT_EXAMPLES: int = 3  # Cantidad de ejemplos para few-shot learning
 
     # Ainstein / Markey WS

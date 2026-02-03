@@ -74,7 +74,7 @@ class PatientBase(BaseModel):
 
 
 class PatientCreate(PatientBase):
-    pass
+    movimiento_id: Optional[str] = None
 
 
 class PatientUpdate(BaseModel):
@@ -93,6 +93,7 @@ class PatientUpdate(BaseModel):
 
 class PatientOut(PatientBase):
     id: str
+    movimiento_id: Optional[str] = None
 
 
 # ---------------------------

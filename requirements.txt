@@ -3,6 +3,7 @@ uvicorn[standard]
 SQLAlchemy
 alembic
 pymysql
+psycopg2-binary
 python-multipart
 passlib[bcrypt]
 PyJWT
@@ -15,6 +16,7 @@ jinja2
 weasyprint
 pdfminer.six
 python-dotenv
+redis>=5.0.0
 
 # LangChain ecosystem
 langchain>=0.1.0
@@ -23,3 +25,11 @@ langchain-community>=0.0.20
 
 # Vector DB for RAG (future)
 qdrant-client>=1.7.0
+
+# FERRO D2 v3.0.0 - OpenTelemetry Observability
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-instrumentation-fastapi>=0.41b0
+opentelemetry-instrumentation-sqlalchemy>=0.41b0
+opentelemetry-instrumentation-redis>=0.41b0
+opentelemetry-exporter-otlp>=1.20.0

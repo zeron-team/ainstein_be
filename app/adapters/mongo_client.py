@@ -149,3 +149,20 @@ async def ensure_indexes() -> None:
     ev = db["epc_versions"]
     await ensure_index(ev, [("epc_id", 1), ("generated_at", -1)], name="ix_epcv_epc_generated")
     await ensure_index(ev, [("patient_id", 1), ("generated_at", -1)], name="ix_epcv_patient_generated")
+    
+    # FERRO D2 v3.0.0: TTL indexes for fire & forget collections
+    # Logs - 30 days retention
+    epc_logs = db["epc_logs"]
+    await ensure_index(epc_logs, [("created_at", 1)], name="ix_epc_logs_ttl", expireAfterSeconds=2592000)
+    
+    # Chat history - 7 days retention
+    chat_history = db["chat_history"]
+    await ensure_index(chat_history, [("created_at", 1)], name="ix_chat_history_ttl", expireAfterSeconds=604800)
+    
+    # LLM usage logs - 90 days retention
+    llm_usage = db["llm_usage"]
+    await ensure_index(llm_usage, [("timestamp", 1)], name="ix_llm_usage_ttl", expireAfterSeconds=7776000)
+    
+    # Feedback logs - 60 days retention
+    epc_feedback = db["epc_feedback"]
+    await ensure_index(epc_feedback, [("created_at", 1)], name="ix_epc_feedback_ttl", expireAfterSeconds=5184000)

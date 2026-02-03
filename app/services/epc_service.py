@@ -380,6 +380,81 @@ class EPCService:
             ai = GeminiAIService()
             content = await ai.generate_epc(prompt)
 
+        # ⚠️ POST-PROCESAMIENTO OBLIGATORIO: Asegurar cumplimiento de reglas
+        # Importar aquí para evitar circular imports
+        from app.services.ai_langchain_service import _post_process_epc_result
+        import json as json_module
+        import re
+        
+        # El content puede tener estructura {"json": {...}}, {"raw_text": "..."} o ser directo
+        if isinstance(content, dict):
+            log.info(f"[EPCService] Content keys: {list(content.keys())}")
+            
+            try:
+                if "json" in content and isinstance(content["json"], dict):
+                    # Caso normal: ya tiene JSON parseado
+                    content["json"] = _post_process_epc_result(content["json"])
+                    log.info("[EPCService] Post-procesamiento aplicado a content.json")
+                    
+                elif "raw_text" in content:
+                    # Caso fallback: Gemini devolvió texto que necesita parsing
+                    raw = content["raw_text"]
+                    log.warning("[EPCService] Recibido raw_text, intentando parsear JSON")
+                    
+                    # Intentar parsear directamente (si raw_text ES el JSON)
+                    parsed = None
+                    
+                    # Primero intentar parsear directamente
+                    try:
+                        # Limpiar el texto (quitar backticks si hay)
+                        clean_text = raw.strip()
+                        if clean_text.startswith("```"):
+                            # Quitar bloque de código markdown
+                            lines = clean_text.split("\n")
+                            # Quitar primera y última línea si son ```
+                            if lines[0].startswith("```"):
+                                lines = lines[1:]
+                            if lines and lines[-1].strip() == "```":
+                                lines = lines[:-1]
+                            clean_text = "\n".join(lines)
+                        
+                        # Intentar parsear
+                        if clean_text.strip().startswith("{"):
+                            parsed = json_module.loads(clean_text)
+                            log.info("[EPCService] JSON parseado directamente desde raw_text")
+                    except json_module.JSONDecodeError:
+                        pass
+                    
+                    # Si no funcionó, buscar con regex más robusto
+                    if parsed is None:
+                        # Buscar desde el primer { hasta el último }
+                        start_idx = raw.find("{")
+                        end_idx = raw.rfind("}")
+                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                            json_str = raw[start_idx:end_idx+1]
+                            try:
+                                parsed = json_module.loads(json_str)
+                                log.info("[EPCService] JSON extraído con índices desde raw_text")
+                            except json_module.JSONDecodeError as je:
+                                log.error(f"[EPCService] No se pudo parsear JSON: {je}")
+                    
+                    if parsed and isinstance(parsed, dict):
+                        parsed = _post_process_epc_result(parsed)
+                        content["json"] = parsed
+                        log.info("[EPCService] JSON parseado y post-procesado desde raw_text")
+                    else:
+                        log.error("[EPCService] No se pudo extraer JSON válido de raw_text")
+                        
+                else:
+                    # Caso legacy: el dict es directamente el contenido
+                    content = _post_process_epc_result(content)
+                    log.info("[EPCService] Post-procesamiento aplicado directo a content")
+                    
+            except Exception as pp_err:
+                log.error(f"[EPCService] Error en post-procesamiento: {pp_err}")
+        else:
+            log.warning(f"[EPCService] Content no es dict, tipo: {type(content)}")
+        
         # ✅ CORRECCIÓN: versiones van a epc_versions (no epc_docs)
         version_doc = {
             "epc_id": row.id,
@@ -389,6 +464,12 @@ class EPCService:
             "generated_at": datetime.utcnow(),
             "content": content,
         }
+        
+        # DEBUG: Log del content antes de guardar
+        log.warning(f"[EPCService] Guardando version, content keys: {list(content.keys()) if isinstance(content, dict) else 'no-dict'}")
+        if isinstance(content, dict) and "json" in content:
+            log.warning(f"[EPCService] content.json keys: {list(content['json'].keys()) if isinstance(content['json'], dict) else 'no-dict'}")
+        
         ins = await mongo.epc_versions.insert_one(version_doc)
 
         row.version_actual_oid = str(ins.inserted_id)

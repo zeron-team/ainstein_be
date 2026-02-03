@@ -33,11 +33,11 @@ async def list_patients(
     svc = PatientService(db)
     result = svc.list(q=q, estado=estado, page=page, page_size=page_size)
     
-    # Enriquecer con datos de EPC desde MongoDB
+    # Enriquecer con datos de EPC y HCE desde MongoDB
     patient_ids = [item["id"] for item in result["items"]]
     if patient_ids:
-        # Buscar la EPC más reciente para cada paciente
-        pipeline = [
+        # 1. Buscar la EPC más reciente para cada paciente
+        epc_pipeline = [
             {"$match": {"patient_id": {"$in": patient_ids}}},
             {"$sort": {"created_at": -1}},
             {"$group": {
@@ -48,18 +48,88 @@ async def list_patients(
             }},
         ]
         epc_data = {}
-        async for doc in mongo.epc_docs.aggregate(pipeline):
+        async for doc in mongo.epc_docs.aggregate(epc_pipeline):
             epc_data[doc["_id"]] = {
                 "epc_created_by_name": doc.get("created_by_name"),
                 "epc_created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
             }
+
+        # 2. Buscar la HCE más reciente (para fechas precisas y tipo de alta)
+        hce_pipeline = [
+            {"$match": {"patient_id": {"$in": patient_ids}}},
+            {"$sort": {"created_at": -1}}, # Ultima HCE importada
+            {"$group": {
+                "_id": "$patient_id",
+                "structured": {"$first": "$structured"},
+                "ainstein": {"$first": "$ainstein"},
+            }},
+        ]
+        hce_data = {}
+        async for doc in mongo.hce_docs.aggregate(hce_pipeline):
+            hce_data[doc["_id"]] = {
+                "structured": doc.get("structured") or {},
+                "ainstein": doc.get("ainstein") or {},
+            }
         
-        # Agregar datos de EPC a cada paciente
+        # Enriquecer items
         for item in result["items"]:
-            epc_info = epc_data.get(item["id"], {})
+            pid = item["id"]
+            
+            # EPC Info
+            epc_info = epc_data.get(pid, {})
             item["epc_created_by_name"] = epc_info.get("epc_created_by_name")
             item["epc_created_at"] = epc_info.get("epc_created_at")
-    
+
+            # HCE Info (Dates & Discharge)
+            if pid in hce_data:
+                h_struc = hce_data[pid]["structured"]
+                h_ainstein = hce_data[pid]["ainstein"]
+                
+                # Fechas desde Mongo (Structured o Ainstein directo)
+                raw_ingreso = h_struc.get("fecha_ingreso")
+                raw_egreso = h_struc.get("fecha_egreso_original") or h_struc.get("fecha_egreso")
+                
+                # Tipo de Alta
+                t_alta = h_struc.get("tipo_alta") or \
+                         (h_ainstein.get("episodio") or {}).get("taltDescripcion")
+
+                # Edad (Directo de Ainstein o calculado en structured)
+                age = h_struc.get("edad") or (h_ainstein.get("episodio") or {}).get("paciEdad")
+
+                # Movimiento (inteCodigo)
+                mov_id = (h_ainstein.get("episodio") or {}).get("inteCodigo") or \
+                         (h_ainstein.get("inteCodigo"))
+                
+                if raw_ingreso:
+                    item["fecha_ingreso"] = str(raw_ingreso)
+                if raw_egreso:
+                    item["fecha_egreso"] = str(raw_egreso)
+                if t_alta:
+                    item["tipo_alta"] = str(t_alta)
+                if age:
+                    item["edad"] = age
+                if mov_id:
+                    item["movimiento_id"] = str(mov_id)
+                
+                # Recalcular días si tenemos fecha ingreso nueva
+                # Intentamos parsear para calculo
+                if item.get("fecha_ingreso"):
+                    try:
+                        # Soportar ISO y formatos comunes de str
+                        fi_str = str(item["fecha_ingreso"]).replace("T", " ").split(".")[0]
+                        fmt = "%Y-%m-%d %H:%M:%S" if " " in fi_str else "%Y-%m-%d"
+                        dt_ingreso = datetime.strptime(fi_str, fmt)
+                        
+                        dt_egreso = datetime.utcnow()
+                        if item.get("fecha_egreso"):
+                            fe_str = str(item["fecha_egreso"]).replace("T", " ").split(".")[0]
+                            dt_egreso = datetime.strptime(fe_str, fmt)
+                        
+                        dias = (dt_egreso - dt_ingreso).days
+                        item["dias_estada"] = dias
+                    except Exception:
+                        pass # Si falla parseo, mantenemos lo que calculó el repo (o nada)
+
     return result
 
 # ---------------------------

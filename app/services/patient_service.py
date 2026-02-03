@@ -86,7 +86,21 @@ class PatientService:
             }
         )
         # Estado inicial = internacion
+        # Estado inicial = internacion
         self.repo.upsert_status(row.id, estado=PatientEstado.internacion.value, observaciones=None)
+
+        # Si viene movimiento_id (Markey), crear la admisión asociada
+        movimiento_id = data.get("movimiento_id")
+        if movimiento_id:
+            adm = Admission(
+                id=str(uuid4()),
+                patient_id=row.id,
+                admision_num=str(movimiento_id),
+                fecha_ingreso=datetime.utcnow(),
+                estado="internacion"
+            )
+            self.db.add(adm)
+            self.db.commit()
 
         patient_out = {
             "id": row.id,
@@ -95,6 +109,7 @@ class PatientService:
             "dni": row.dni,
             "obra_social": row.obra_social,
             "nro_beneficiario": row.nro_beneficiario,
+            "movimiento_id": movimiento_id,
         }
         return patient_out, PatientEstado.internacion.value
 

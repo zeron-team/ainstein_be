@@ -123,10 +123,14 @@ def _coalesce_sections(sections: Optional[Dict[str, Any]]) -> List[tuple[str, An
         "Evolución",
         "Procedimientos",
         "Interconsultas",
+        "Plan Terapéutico",
         "Tratamiento / Medicación",
         "Indicaciones de alta",
-        "Recomendaciones",
+        # "Notas al Alta" / "Recomendaciones" - EXCLUIDAS del PDF
     ]
+    
+    # Secciones excluidas del PDF
+    excluded_from_pdf = {"Notas al Alta", "Notas al alta", "notas_alta", "Recomendaciones", "recomendaciones"}
 
     out: List[tuple[str, Any]] = []
     used = set()
@@ -138,6 +142,9 @@ def _coalesce_sections(sections: Optional[Dict[str, Any]]) -> List[tuple[str, An
 
     for k, v in sections.items():
         if k in used:
+            continue
+        # Excluir Notas al Alta / Recomendaciones del PDF
+        if k in excluded_from_pdf:
             continue
         # Protección: evitamos imprimir claves típicas “ruido” si vienen de payloads raros
         # (no rompe si no existen).

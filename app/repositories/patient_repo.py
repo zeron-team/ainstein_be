@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Dict
 from uuid import uuid4
+from datetime import datetime
 
 from sqlalchemy import func, or_, and_
 from sqlalchemy.orm import Session
@@ -165,6 +166,8 @@ class PatientRepo:
                 Admission.sector,
                 Admission.habitacion,
                 Admission.cama,
+                Admission.fecha_ingreso,
+                Admission.fecha_egreso,
             )
             .outerjoin(PatientStatus, PatientStatus.patient_id == Patient.id)
             # join con la última admisión
@@ -207,7 +210,24 @@ class PatientRepo:
         )
 
         out: List[dict] = []
-        for p, status_estado, adm_num, sector, habitacion, cama in rows:
+        for p, status_estado, adm_num, sector, habitacion, cama, fingreso, fegreso in rows:
+            # Calcular edad (simple)
+            edad = None
+            if p.fecha_nacimiento:
+                try:
+                    # Intento basico YYYY-MM-DD
+                    bd = datetime.strptime(str(p.fecha_nacimiento)[:10], "%Y-%m-%d")
+                    now = datetime.utcnow()
+                    edad = now.year - bd.year - ((now.month, now.day) < (bd.month, bd.day))
+                except:
+                    pass
+
+            # Dias estada
+            dias_estada = None
+            if fingreso:
+                end_dt = fegreso or datetime.utcnow()
+                dias_estada = (end_dt - fingreso).days
+
             # prioridad: patients.estado -> patient_status.estado -> 'internacion'
             est_final = p.estado or status_estado or "internacion"
             out.append(
@@ -220,6 +240,7 @@ class PatientRepo:
                     "nro_beneficiario": p.nro_beneficiario,
                     # columnas que usa el list.tsx
                     "hce_adm": adm_num,
+                    "movimiento_id": adm_num, # Nuevo campo solicitado como "Mov"
                     "sector": sector,
                     "habitacion": habitacion,
                     "cama": cama,
@@ -227,6 +248,13 @@ class PatientRepo:
                     # Estos campos se enriquecen desde MongoDB en el router
                     "epc_created_by_name": None,
                     "epc_created_at": None,
+                    # Nuevos campos solicitados
+                    "fecha_ingreso": fingreso.isoformat() if fingreso else None,
+                    "fecha_egreso": fegreso.isoformat() if fegreso else None,
+                    "edad": edad,
+                    "sexo": p.sexo,
+                    "dias_estada": dias_estada,
+                    "tipo_alta": "-", # No disponible en modelo actual
                 }
             )
         return out

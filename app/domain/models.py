@@ -1,6 +1,6 @@
 # app/domain/models.py
 from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, Boolean
-from sqlalchemy.dialects.mysql import CHAR, TINYINT
+# Removed mysql specific dialects
 from sqlalchemy.sql import func, text
 from sqlalchemy.orm import relationship
 
@@ -10,30 +10,34 @@ from app.db.base import Base
 class Role(Base):
     __tablename__ = "roles"
 
-    id = Column(TINYINT, primary_key=True)
+    # Changed TINYINT to Integer for Postgres compatibility
+    id = Column(Integer, primary_key=True)
     name = Column(String(20), unique=True, nullable=False)
 
 
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(CHAR(36), primary_key=True)
+    # uuid/CHAR(36) is fine, Postgres has UUID type but CHAR(36) works for compatibility
+    id = Column(String(36), primary_key=True)
     username = Column(String(80), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(120), nullable=False)
     email = Column(String(120), unique=True)
-    role_id = Column(TINYINT, ForeignKey("roles.id"), nullable=False)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
+    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=True)  # Multi-tenant
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, onupdate=func.now())
 
     role = relationship("Role")
+    tenant = relationship("Tenant", back_populates="users")
 
 
 class Patient(Base):
     __tablename__ = "patients"
 
-    id = Column(CHAR(36), primary_key=True)
+    id = Column(String(36), primary_key=True)
     dni = Column(String(20))
     cuil = Column(String(20))
     obra_social = Column(String(80))
@@ -51,6 +55,7 @@ class Patient(Base):
     telefono = Column(String(40))
     email = Column(String(120))
     domicilio = Column(Text)
+    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=True)  # Multi-tenant
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, onupdate=func.now())
 
@@ -59,7 +64,7 @@ class PatientStatus(Base):
     __tablename__ = "patient_status"
 
     patient_id = Column(
-        CHAR(36),
+        String(36),
         ForeignKey("patients.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -71,9 +76,9 @@ class PatientStatus(Base):
 class Admission(Base):
     __tablename__ = "admissions"
 
-    id = Column(CHAR(36), primary_key=True)
+    id = Column(String(36), primary_key=True)
     patient_id = Column(
-        CHAR(36),
+        String(36),
         ForeignKey("patients.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -90,18 +95,19 @@ class Admission(Base):
         nullable=False,
         server_default=text("'internacion'"),
     )
+    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=True)  # Multi-tenant
 
 
 class EPC(Base):
     __tablename__ = "epc"
 
-    id = Column(CHAR(36), primary_key=True)
+    id = Column(String(36), primary_key=True)
     patient_id = Column(
-        CHAR(36),
+        String(36),
         ForeignKey("patients.id", ondelete="CASCADE"),
         nullable=False,
     )
-    admission_id = Column(CHAR(36), ForeignKey("admissions.id"))
+    admission_id = Column(String(36), ForeignKey("admissions.id"))
 
     # Estado principal
     estado = Column(String(20), nullable=False, default="borrador")
@@ -114,7 +120,8 @@ class EPC(Base):
     medico_responsable = Column(String(120))
     firmado_por_medico = Column(Boolean, default=False)
 
-    created_by = Column(CHAR(36), ForeignKey("users.id"), nullable=False)
+    created_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=True)  # Multi-tenant
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, onupdate=func.now())
 
@@ -128,7 +135,7 @@ class EPC(Base):
     recomendaciones = Column(Text)
 
     # Auditoría de edición / regeneración
-    last_edited_by = Column(CHAR(36), ForeignKey("users.id"))
+    last_edited_by = Column(String(36), ForeignKey("users.id"))
     last_edited_at = Column(DateTime)
     has_manual_changes = Column(Boolean, default=False)
     regenerated_count = Column(Integer, server_default="0", nullable=False)
@@ -146,7 +153,7 @@ class EPCEvent(Base):
     __tablename__ = "epc_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    epc_id = Column(CHAR(36), nullable=False)
+    epc_id = Column(String(36), nullable=False)
     at = Column(DateTime, server_default=func.now(), nullable=False)
     by = Column(String(120))
     action = Column(Text, nullable=False)
@@ -156,6 +163,7 @@ class Branding(Base):
     __tablename__ = "branding"
 
     id = Column(Integer, primary_key=True)
+    tenant_id = Column(String(36), ForeignKey("tenants.id"), nullable=True)  # Per-tenant branding
     hospital_nombre = Column(String(160))
     logo_url = Column(String(255))
     header_linea1 = Column(String(255))
@@ -168,3 +176,89 @@ class Branding(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    tenant = relationship("Tenant", back_populates="branding")
+
+
+# =============================================================================
+# MULTI-TENANCY MODELS
+# =============================================================================
+
+class Tenant(Base):
+    """
+    Represents a tenant (hospital, clinic, sanatorium) in the multi-tenant system.
+    Each tenant has isolated data and can integrate via API.
+    
+    Integration Types:
+    - 'inbound': We consume from them (they provide endpoint + token)
+    - 'outbound': They consume from us (we provide API keys)
+    - 'bidirectional': Both directions
+    """
+    __tablename__ = "tenants"
+
+    id = Column(String(36), primary_key=True)  # UUID
+    code = Column(String(50), unique=True, nullable=False)  # e.g., "markey", "hospital_xyz"
+    name = Column(String(160), nullable=False)  # "Hospital XYZ"
+    logo_url = Column(String(255))
+    contact_email = Column(String(120))
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, onupdate=func.now())
+
+    # =========================================================================
+    # INTEGRATION CONFIGURATION
+    # =========================================================================
+    
+    # Integration type: 'inbound', 'outbound', 'bidirectional'
+    integration_type = Column(String(20), default='outbound', nullable=False)
+    
+    # --- INBOUND (we consume from them) ---
+    # Their endpoint where we fetch data (e.g., HCE)
+    external_endpoint = Column(String(512))
+    # Their authentication token (should be encrypted in production)
+    external_token = Column(String(512))
+    # Their auth type: 'bearer', 'api_key', 'basic', 'oauth2'
+    external_auth_type = Column(String(20), default='bearer')
+    # Additional headers as JSON (e.g., {"X-Custom-Header": "value"})
+    external_headers = Column(Text)
+    
+    # --- OUTBOUND (they consume from us) ---
+    # We provide API Keys via TenantAPIKey table
+    # Allowed scopes/permissions as comma-separated: 'read_patients,write_patients,generate_epc,read_epc,webhook'
+    allowed_scopes = Column(String(512), default='read_patients,read_epc')
+    
+    # --- GENERAL ---
+    # Webhook URL for async notifications (EPC ready, etc.)
+    webhook_url = Column(String(512))
+    # Secret for webhook signature verification
+    webhook_secret = Column(String(255))
+    # Rate limit: requests per minute
+    api_rate_limit = Column(Integer, default=100)
+    
+    # Notes/description for internal reference
+    notes = Column(Text)
+
+    # Relationships
+    api_keys = relationship("TenantAPIKey", back_populates="tenant")
+    branding = relationship("Branding", back_populates="tenant", uselist=False)
+    users = relationship("User", back_populates="tenant")
+
+
+class TenantAPIKey(Base):
+    """
+    API keys for external systems to authenticate with the platform.
+    Each tenant can have multiple API keys (production, test, etc.).
+    """
+    __tablename__ = "tenant_api_keys"
+
+    id = Column(String(36), primary_key=True)  # UUID
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    key_hash = Column(String(255), nullable=False)  # SHA256 of API key (never store plain)
+    key_prefix = Column(String(20))  # First chars for identification (e.g., "ak_markey_")
+    name = Column(String(80))  # "Production Key", "Test Key"
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    last_used_at = Column(DateTime)
+    expires_at = Column(DateTime)  # Optional expiration
+
+    tenant = relationship("Tenant", back_populates="api_keys")

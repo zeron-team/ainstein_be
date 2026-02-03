@@ -18,6 +18,14 @@ log = logging.getLogger(__name__)
 
 # Pricing de Gemini (USD por 1M tokens) - Enero 2024
 GEMINI_PRICING = {
+    "gemini-2.5-pro-preview-05-06": {
+        "input": 1.25,    # $1.25 per 1M input tokens
+        "output": 10.00,  # $10.00 per 1M output tokens
+    },
+    "gemini-2.5-pro": {
+        "input": 1.25,
+        "output": 10.00,
+    },
     "gemini-2.0-flash": {
         "input": 0.075,   # $0.075 per 1M input tokens
         "output": 0.30,   # $0.30 per 1M output tokens

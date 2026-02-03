@@ -6,10 +6,12 @@ Integra:
 - LangChain para orquestación de LLM
 - Qdrant para recuperación de contexto similar
 - Feedback loop para few-shot learning
+- Redis caching (FERRO D2 v3.0.0)
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime
@@ -61,19 +63,37 @@ class RAGService:
         self,
         hce_text: str,
         patient_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         pages: int = 0,
     ) -> Dict[str, Any]:
         """
         Genera EPC con RAG - recuperando contexto similar y ejemplos exitosos.
         
+        FERRO D2 v3.0.0: Redis-first caching (Dopamine Effect)
+        
         Args:
             hce_text: Texto de la HCE
             patient_id: ID del paciente (opcional, para filtrado)
+            tenant_id: ID del tenant para cache namespace
             pages: Número de páginas
         
         Returns:
             Diccionario con EPC generada y metadatos
         """
+        # FERRO D2: Redis-first cache lookup
+        cache_key = None
+        if tenant_id and patient_id:
+            from app.services.redis_cache import get_redis_cache
+            cache = get_redis_cache()
+            hce_hash = hashlib.sha256(hce_text.encode()).hexdigest()[:16]
+            cache_key = cache.epc_cache_key(tenant_id, patient_id, hce_hash)
+            
+            cached = await cache.get(cache_key)
+            if cached:
+                log.info("[RAGService] Cache HIT for patient %s", patient_id)
+                cached["_cache_hit"] = True
+                return cached
+        
         feedback_examples = []
         similar_context = []
         
@@ -108,6 +128,17 @@ class RAGService:
         result["_rag_enabled"] = self._use_vector_store
         result["_feedback_examples_count"] = len(feedback_examples)
         result["_similar_context_count"] = len(similar_context)
+        result["_cache_hit"] = False
+        
+        # FERRO D2: Cache store (async, non-blocking)
+        if cache_key:
+            try:
+                from app.services.redis_cache import get_redis_cache
+                cache = get_redis_cache()
+                await cache.set(cache_key, result, ttl=cache.TTL_EPC_CACHE)
+                log.info("[RAGService] Cached EPC for patient %s", patient_id)
+            except Exception as e:
+                log.warning("[RAGService] Failed to cache result: %s", e)
         
         return result
     

@@ -188,7 +188,7 @@ Eres un médico clínico. A partir del texto de una HCE, extrae (en JSON estrict
 }}
 
 Responde SOLO el JSON. Texto HCE:
-\"\"\"{text[:150000]}\"\"\""""
+\"\"\"{text}\"\"\""""
         raw = await ai.generate_epc(prompt)
         if isinstance(raw, str):
             try:
@@ -330,7 +330,8 @@ async def import_ainstein_hce(
     """
     Recibe { episodio, historia } desde el frontend y:
     - crea/asegura Patient + Admission (internación activa => fecha_egreso NULL)
-    - guarda en MongoDB (hce_docs)
+    - guarda en MongoDB (hce_docs) 100% SIN TRUNCAR
+    - aplica chunking y embeddings para RAG en Qdrant
     """
     episodio = payload.get("episodio")
     historia = payload.get("historia")
@@ -338,6 +339,7 @@ async def import_ainstein_hce(
     patient_id = payload.get("patient_id")
     admission_id = payload.get("admission_id")
     use_ai = bool(payload.get("use_ai", False))
+    apply_embeddings = bool(payload.get("apply_embeddings", True))  # Por defecto TRUE
 
     if not isinstance(episodio, dict):
         raise HTTPException(status_code=400, detail="Falta 'episodio' (objeto) en el body.")
@@ -354,19 +356,28 @@ async def import_ainstein_hce(
     if admission_id:
         adm_id = admission_id
 
+    # =========================================================================
+    # TEXTO COMPLETO 100% - SIN TRUNCAR
+    # =========================================================================
+    # Guardar historia completa como JSON para referencia
+    historia_json = json.dumps(historia, ensure_ascii=False)
+    
     # Texto liviano; la historia completa queda en "ainstein.historia"
     text_stub = json.dumps(
         {
             "source": "ainstein",
             "inteCodigo": episodio.get("inteCodigo"),
             "paciCodigo": episodio.get("paciCodigo"),
+            "historia_chars": len(historia_json),
         },
         ensure_ascii=False,
     )
 
+    # AI enrichment - SIN LÍMITE DE CARACTERES
     ai_data: Optional[Dict[str, Any]] = None
     if use_ai:
-        ai_text = json.dumps(historia, ensure_ascii=False)[:150000]
+        # Usar TODO el texto sin truncar
+        ai_text = historia_json  # 100% sin [:150000]
         ai_data = await _maybe_ai_enrich(ai_text)
 
     doc = {
@@ -382,8 +393,8 @@ async def import_ainstein_hce(
             "paciCodigo": episodio.get("paciCodigo"),
         },
         "ainstein": {
-            "episodio": episodio,
-            "historia": historia,
+            "episodio": episodio,  # 100% completo
+            "historia": historia,  # 100% completo SIN TRUNCAR
         },
         "created_by": user["id"],
         "created_at": datetime.utcnow(),
@@ -391,11 +402,52 @@ async def import_ainstein_hce(
     }
 
     ins = await mongo.hce_docs.insert_one(doc)
+    hce_id = str(ins.inserted_id)
+    
+    # =========================================================================
+    # CHUNKING + EMBEDDINGS PARA RAG (Qdrant)
+    # =========================================================================
+    embedding_result = {"status": "skipped", "chunks": 0}
+    
+    if apply_embeddings:
+        try:
+            from app.services.hce_ainstein_parser import HCEAinsteinParser
+            from app.services.vector_service import get_vector_service
+            
+            # Parsear y chunkar
+            parser = HCEAinsteinParser()
+            chunks = parser.chunk_by_registry_type(historia, hce_id)
+            
+            if chunks:
+                vector_service = get_vector_service()
+                
+                # Indexar cada chunk
+                for i, chunk in enumerate(chunks):
+                    chunk_id = f"{hce_id}_{chunk.tipo}_{i}"
+                    await vector_service.add_hce_chunk(
+                        chunk_id=chunk_id,
+                        text=chunk.texto,
+                        metadata={
+                            "hce_id": hce_id,
+                            "patient_id": pid,
+                            "tipo": chunk.tipo,
+                            "fecha": chunk.fecha or "",
+                            "chunk_index": i,
+                        },
+                    )
+                
+                embedding_result = {"status": "ok", "chunks": len(chunks)}
+                
+        except Exception as e:
+            embedding_result = {"status": "error", "error": str(e)}
 
     return {
         "ok": True,
-        "hce_id": str(ins.inserted_id),
+        "hce_id": hce_id,
         "patient_id": pid,
         "admission_id": adm_id,
         "estado": "internacion",
+        "historia_registros": len(historia) if isinstance(historia, list) else 0,
+        "historia_chars": len(historia_json),
+        "embeddings": embedding_result,
     }

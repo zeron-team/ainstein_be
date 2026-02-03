@@ -3,6 +3,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.core.security import decode_token
 from app.repositories.user_repo import UserRepo
 from app.db.session import SessionLocal
+# FERRO: Import Redis
+from app.core.redis import get_redis as _get_redis
 
 bearer = HTTPBearer()
 
@@ -12,6 +14,10 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# FERRO: Redis Dependency
+async def get_redis():
+    return await _get_redis()
 
 def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer), db=Depends(get_db)):
     token = creds.credentials

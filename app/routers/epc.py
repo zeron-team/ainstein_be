@@ -29,6 +29,36 @@ from app.services.ai_gemini_service import GeminiAIService
 from app.services.epc_history import log_epc_event, get_epc_history
 from app.utils.epc_pdf import build_epicrisis_pdf
 
+# =============================================================================
+# IMPORTS DE SERVICIOS REFACTORIZADOS (SOLID)
+# =============================================================================
+from app.services.epc.helpers import (
+    now as _now,
+    uuid_str as _uuid_str,
+    clean_str as _clean_str,
+    parse_dt_maybe as _parse_dt_maybe,
+    safe_objectid as _safe_objectid,
+    uuid_variants as _uuid_variants,
+    json_from_ai as _json_from_ai,
+    actor_name as _actor_name,
+    age_from_ymd as _age_from_ymd,
+    list_to_lines as _list_to_lines,
+)
+from app.services.epc.hce_extractor import (
+    HCEExtractor,
+    extract_hce_text as _extract_hce_text,
+    extract_clinical_data as _extract_clinical_data,
+)
+from app.services.epc.pdf_builder import (
+    build_epc_pdf_payload as _epc_pdf_payload_from_context,
+)
+from app.services.epc.feedback_service import (
+    EPCFeedbackService,
+    FeedbackData,
+    FeedbackValidationError,
+    get_feedback_service,
+)
+
 log = logging.getLogger(__name__)
 
 ESTADO_INTERNACION = "internacion"
@@ -37,21 +67,23 @@ ESTADO_EPC_GENERADA = "epc_generada"
 router = APIRouter(prefix="/epc", tags=["EPC / Epicrisis"])
 
 
-# -----------------------------------------------------------------------------
-# Helpers generales
-# -----------------------------------------------------------------------------
-def _now() -> datetime:
-    return datetime.utcnow()
+# =============================================================================
+# HELPERS LEGACY (DEPRECADOS - usar imports de app.services.epc)
+# Se mantienen temporalmente por compatibilidad, pero serán eliminados.
+# =============================================================================
+# NOTA: Las funciones _now, _uuid_str, _clean_str, etc. ahora se importan desde services/epc
+#
+# Funciones movidas a app/services/epc/helpers.py:
+#   _clean_str, _parse_dt_maybe, _safe_objectid, _uuid_variants, _json_from_ai,
+#   _actor_name, _age_from_ymd, _list_to_lines
+#
+# Funciones movidas a app/services/epc/hce_extractor.py:
+#   _pick_best_hce_text, _extract_ainstein_text, _extract_hce_text
+#
+# Ver docs/REFACTORING_SOLID_CHANGELOG.md para detalles completos
+# =============================================================================
 
-
-def _uuid_str() -> str:
-    return str(uuid.uuid4())
-
-
-def _clean_str(s: Optional[str]) -> str:
-    if not s:
-        return ""
-    return " ".join(str(s).split())
+# ELIMINADO: def _clean_str - ahora importado desde services/epc
 
 
 def _parse_dt_maybe(val: Any) -> Optional[datetime]:
@@ -472,6 +504,7 @@ def _epc_pdf_payload_from_context(
     epc_doc: Dict[str, Any],
     patient: Optional[Patient],
     clinical: Dict[str, Any],
+    hce: Optional[Dict[str, Any]] = None,  # <- NUEVO: pasar HCE para expandir labs
 ) -> Dict[str, Any]:
     """
     Arma el payload "amigable" para el PDF a partir del doc Mongo + paciente SQL + clinical derivado.
@@ -552,16 +585,116 @@ def _epc_pdf_payload_from_context(
 
     procedimientos = gdata.get("procedimientos") or generated.get("procedimientos") or []
     interconsultas = gdata.get("interconsultas") or generated.get("interconsultas") or []
-    medicacion = gdata.get("medicacion") or generated.get("medicacion") or []
+    
+    # Medicación - NUEVA ESTRUCTURA SEPARADA
+    medicacion_internacion = gdata.get("medicacion_internacion") or generated.get("medicacion_internacion") or []
+    medicacion_previa = gdata.get("medicacion_previa") or generated.get("medicacion_previa") or []
+    medicacion_legacy = gdata.get("medicacion") or generated.get("medicacion") or []
+    
     indicaciones_alta = gdata.get("indicaciones_alta") or generated.get("indicaciones_alta") or []
     recomendaciones = gdata.get("recomendaciones") or generated.get("recomendaciones") or []
+
+    # EXPANSIÓN DE LABS PARA PDF
+    # Leer configuración de exportación del usuario
+    export_config = epc_doc.get("export_config", {})
+    selected_labs = export_config.get("selected_labs", [])
+    
+    # Si procedimientos tiene el tag agrupado de labs, decidir qué hacer según selección
+    if procedimientos and hce:
+        procedimientos_expandidos = []
+        labs_expandidos = False
+        
+        for proc_item in procedimientos:
+            proc_str = str(proc_item) if not isinstance(proc_item, str) else proc_item
+            
+            # Detectar tag agrupado de labs
+            if "Laboratorios realizados" in proc_str and "estudios)" in proc_str:
+                # CASO 1: No hay selección → mantener tag agrupado
+                if not selected_labs:
+                    procedimientos_expandidos.append(proc_item)
+                    continue
+                
+                # CASO 2: Hay selección → expandir solo los seleccionados
+                parsed_hce = hce.get("ai_generated", {}) or {}
+                parsed_data = parsed_hce.get("parsed_hce", {})
+                procedimientos_hce = parsed_data.get("procedimientos", [])
+                
+                if procedimientos_hce:
+                    # Filtrar solo laboratorios que estén en la selección del usuario
+                    labs_individuales = [
+                        p for p in procedimientos_hce 
+                        if isinstance(p, dict) 
+                        and p.get("categoria") == "laboratorio"
+                        and p.get("descripcion") in selected_labs
+                    ]
+                    
+                    if labs_individuales:
+                        # Agregar header
+                        procedimientos_expandidos.append("Laboratorios seleccionados:")
+                        # Agregar cada lab con fecha y descripción
+                        for lab in labs_individuales:
+                            fecha = lab.get("fecha", "")[:16] if lab.get("fecha") else ""  # YYYY-MM-DD HH:MM
+                            desc = lab.get("descripcion", "Lab")
+                            if fecha:
+                                procedimientos_expandidos.append(f"  {fecha}: {desc}")
+                            else:
+                                procedimientos_expandidos.append(f"  {desc}")
+                        labs_expandidos = True
+                    else:
+                        # Selección sin labs válidos → mantener tag agrupado
+                        procedimientos_expandidos.append(proc_item)
+            
+            # Si no es el tag agrupado, mantener como está
+            if not ("Laboratorios realizados" in proc_str and "estudios)" in proc_str):
+                procedimientos_expandidos.append(proc_item)
+        
+        # Si se expandió, usar la lista expandida
+        if labs_expandidos:
+            procedimientos = procedimientos_expandidos
 
     if procedimientos:
         sections["Procedimientos"] = _list_to_lines(procedimientos)
     if interconsultas:
         sections["Interconsultas"] = _list_to_lines(interconsultas)
-    if medicacion:
-        sections["Tratamiento / Medicación"] = _list_to_lines(medicacion)
+    
+    # MEDICACIÓN CON SUBSECCIONES
+    # Si hay medicación separada (nueva estructura), mostrar con subsecciones
+    # Si no, usar legacy para compatibilidad con EPCs antiguas
+    if medicacion_internacion or medicacion_previa:
+        med_lines = []
+        
+        if medicacion_internacion:
+            med_lines.append("Medicación durante internación:")
+            for med in medicacion_internacion:
+                # Formatear: "FARMACO dosis via frecuencia"
+                parts = [
+                    med.get("farmaco", ""),
+                    med.get("dosis", ""),
+                    med.get("via", ""),
+                    med.get("frecuencia", "")
+                ]
+                med_str = " ".join([p for p in parts if p]).strip()
+                med_lines.append(f"• {med_str}")
+        
+        if medicacion_previa:
+            if med_lines:  # Si ya hay medicación de internación, agregar espacio
+                med_lines.append("")
+            med_lines.append("Medicación habitual previa:")
+            for med in medicacion_previa:
+                parts = [
+                    med.get("farmaco", ""),
+                    med.get("dosis", ""),
+                    med.get("via", "")
+                ]
+                med_str = " ".join([p for p in parts if p]).strip()
+                med_lines.append(f"• {med_str}")
+        
+        if med_lines:
+            sections["Plan Terapéutico"] = "\n".join(med_lines)
+    elif medicacion_legacy:
+        # Compatibilidad con EPCs antiguas
+        sections["Plan Terapéutico"] = _list_to_lines(medicacion_legacy)
+    
     if indicaciones_alta:
         sections["Indicaciones de alta"] = _list_to_lines(indicaciones_alta)
     if recomendaciones:
@@ -893,6 +1026,123 @@ async def open_epc_for_patient(
 
 
 # -----------------------------------------------------------------------------
+# FERRO D2 v3.0.0: Streaming EPC Generation (SSE)
+# -----------------------------------------------------------------------------
+@router.post(
+    "/{epc_id}/stream",
+    summary="Genera EPC con streaming SSE (FERRO D2)",
+)
+async def stream_epc_generation(
+    epc_id: str,
+    hce_id: Optional[str] = Query(default=None, description="HCE ID a usar"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    FERRO D2 v3.0.0: Streaming LLM endpoint.
+    
+    Returns Server-Sent Events (SSE) with chunks of generated content.
+    Frontend can display partial results as they arrive.
+    """
+    from fastapi.responses import StreamingResponse
+    import asyncio
+    
+    epc_doc = await mongo.epc_docs.find_one({"_id": epc_id})
+    if not epc_doc:
+        raise HTTPException(status_code=404, detail="EPC no encontrado")
+    
+    patient_id = epc_doc.get("patient_id")
+    if not patient_id:
+        raise HTTPException(status_code=400, detail="EPC sin patient_id")
+    
+    async def event_generator():
+        """Generate SSE events with EPC content chunks."""
+        try:
+            # Send initial status
+            yield f"data: {json.dumps({'status': 'started', 'message': 'Iniciando generación...'})}\n\n"
+            
+            # Find HCE
+            if hce_id:
+                hce = await _find_hce_by_id(hce_id)
+            else:
+                dni = None
+                preg = PatientRepo(db).get(patient_id)
+                if preg and getattr(preg, "dni", None):
+                    dni = preg.dni
+                hce = await _find_latest_hce_for_patient(
+                    patient_id=patient_id,
+                    admission_id=epc_doc.get("admission_id"),
+                    dni=dni,
+                    allow_any=False,
+                )
+            
+            if not hce:
+                yield f"data: {json.dumps({'status': 'error', 'message': 'HCE no encontrada'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'HCE localizada, procesando...'})}\n\n"
+            
+            # Extract text
+            hce_text = _extract_hce_text(hce)
+            if not hce_text or len(hce_text.strip()) < 80:
+                yield f"data: {json.dumps({'status': 'error', 'message': 'Texto HCE insuficiente'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'status': 'generating', 'message': 'Generando EPC con IA...'})}\n\n"
+            
+            # Generate using LangChain service
+            from app.services.ai_langchain_service import LangChainAIService
+            ai_service = LangChainAIService()
+            
+            result = await ai_service.generate_epc(hce_text=hce_text, pages=0)
+            generated_data = result.get("json", {})
+            
+            # Stream sections progressively
+            sections = [
+                ("motivo_internacion", "Motivo de internación"),
+                ("evolucion", "Evolución"),
+                ("procedimientos", "Procedimientos"),
+                ("interconsultas", "Interconsultas"),
+                ("medicacion", "Medicación"),
+                ("indicaciones_alta", "Indicaciones de alta"),
+                ("recomendaciones", "Recomendaciones"),
+            ]
+            
+            for key, label in sections:
+                if generated_data.get(key):
+                    yield f"data: {json.dumps({'status': 'section', 'section': key, 'label': label, 'content': generated_data[key]})}\n\n"
+                    await asyncio.sleep(0.1)  # Small delay for progressive display
+            
+            # Save to MongoDB
+            await mongo.epc_docs.update_one(
+                {"_id": epc_id},
+                {
+                    "$set": {
+                        "generated": {"data": generated_data, "provider": result.get("_provider")},
+                        "hce_origin_id": str(hce.get("_id")),
+                        "updated_at": _now(),
+                    }
+                },
+            )
+            
+            yield f"data: {json.dumps({'status': 'completed', 'message': 'EPC generada exitosamente'})}\n\n"
+            
+        except Exception as e:
+            log.error("[stream_epc] Error: %s", e)
+            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# -----------------------------------------------------------------------------
 # Generar EPC desde IA (Gemini) usando HCE como fuente
 # -----------------------------------------------------------------------------
 @router.post(
@@ -1034,133 +1284,117 @@ async def generate_epc(
         len(hce_text),
     )
 
-    ai = GeminiAIService()
-    prompt = f"""
-Analiza el siguiente texto de una Historia Clínica Electrónica (HCE) y genera una EPICRISIS en formato JSON.
-
-Reglas generales:
-- SOLO devuelve el objeto JSON (sin comentarios, sin texto extra).
-- Completa con "" o [] si algo no se deduce del texto (no inventes datos).
-- Usa español (Argentina) y un lenguaje médico técnico, directo y práctico (estilo pase/entre colegas). Evitá tono literario o excesivamente formal.
-- Usa TODA la información clínica relevante disponible en el texto. No resumas en exceso.
-- La epicrisis COMPLETA (toda la salida JSON serializada en una sola línea o con saltos) DEBE tener entre 300 y 1500 caracteres (inclusive). Si al primer intento queda fuera de ese rango:
-  - Ajustá SOLO el nivel de detalle del campo "evolucion" (y, si es necesario, las listas "procedimientos", "interconsultas", "indicaciones_alta", "recomendaciones") para entrar en el rango.
-  - NO inventes datos y NO elimines información clínica relevante; condensá con redacción médica más compacta.
-  - Mantén siempre la estructura JSON EXACTA indicada.
-- La medicación/tratamiento farmacológico DEBE ir en "medicacion". En "evolucion" podés mencionar “se indicó/recibió tratamiento” de forma general, pero NO listar fármacos, dosis, vía ni frecuencia ahí (eso va solo en "medicacion").
-
-Requisitos específicos por campo:
-
-- "motivo_internacion":
-  - Debe ser una frase clara que explique por qué la paciente requirió internación
-    (síntomas principales, mecanismo del trauma, motivo de consulta).
-  - Ej.: "FRACTURA CERRADA DE DIÁFISIS DE CLAVÍCULA IZQUIERDA POR TRAUMATISMO EN VÍA PÚBLICA".
-
-- "diagnostico_principal_cie10":
-  - Código CIE-10 principal que mejor represente el motivo de internación, si puede inferirse.
-
-- "evolucion":
-  - DEBE ser un texto EXTENSO, mínimo 2 a 4 párrafos, con lenguaje médico técnico y directo.
-  - Describir cronológicamente:
-    - Antecedentes personales relevantes.
-    - Motivo y forma de presentación (ej.: accidente de tránsito, caída, inicio de síntomas).
-    - Evaluación inicial: signos y síntomas, hallazgos al examen físico.
-    - Estudios complementarios realizados (ej.: Rx, TAC, laboratorio, ECO-FAST) y sus resultados.
-    - Conducta diagnóstica y terapéutica durante la internación (sin detallar fármacos: eso va en "medicacion").
-    - Evolución clínica hasta el alta, incluyendo respuesta al tratamiento y condición al egreso.
-  - Evitar frases genéricas como "buena evolución" sin detalle.
-  - NO listar fármacos/dosis/vía/frecuencia en este campo.
-
-- "procedimientos":
-  - Lista de procedimientos diagnósticos o terapéuticos relevantes (ej.: inmovilización, yeso, cirugía, estudios de imágenes).
-  - Orden obligatorio por relevancia clínica:
-    1) Primero los procedimientos mayores/decisivos (ej.: cirugía, intervenciones, drenajes, intubación, cardioversión, hemodiálisis, colocación de accesos, reducción/inmovilización, etc.).
-    2) Luego estudios/maniobras relevantes para la conducta (TAC clave, angioTAC, ECO-FAST positivo, etc.).
-    3) Al final procedimientos/estudios de rutina o menor impacto (ej.: ecocardiograma de control, Rx de control, laboratorio seriado, etc.).
-  - Evitá duplicados.
-
-- "interconsultas":
-  - Lista de interconsultas. Cada elemento puede ser:
-    - Un string descriptivo, o
-    - Un objeto con campos: "especialidad" y "resumen".
-
-- "medicacion":
-  - Lista de objetos con: "farmaco", "dosis", "via", "frecuencia".
-  - Utilizar los datos de la HCE cuando estén disponibles.
-  - Si no hay datos completos, completar con "" en los campos faltantes, pero mantener la estructura.
-
-- "indicaciones_alta" y "recomendaciones":
-  - Listas de strings con indicaciones concretas (ej.: uso de cabestrillo, analgesia, control por consultorio externo, pautas de alarma).
-
-Formato EXACTO de salida (solo este JSON, sin texto adicional):
-
-{{
-  "motivo_internacion": "",
-  "diagnostico_principal_cie10": "",
-  "evolucion": "",
-  "procedimientos": [],
-  "interconsultas": [],
-  "medicacion": [{{"farmaco":"", "dosis":"", "via":"", "frecuencia":""}}],
-  "indicaciones_alta": [],
-  "recomendaciones": []
-}}
-
-\"\"\"{hce_text}\"\"\"
-"""
-    raw = await ai.generate_epc(prompt)
+    # ------------------------------------------------------------------
+    # 2.b) Detectar tipo de HCE y usar parser apropiado
+    # ------------------------------------------------------------------
+    try:
+        # Detectar si es HCE JSON estructurado (tiene ainstein.historia)
+        is_json_hce = bool(
+            hce and 
+            isinstance(hce.get("ainstein"), dict) and 
+            hce.get("ainstein", {}).get("historia")
+        )
+        
+        if is_json_hce:
+            # Usar parser JSON estructurado
+            from app.services.hce_json_parser import generate_epc_from_json
+            
+            log.info("[generate_epc] Detectado HCE JSON estructurado, usando parser JSON")
+            data = await generate_epc_from_json(hce, patient_id)
+        else:
+            # Usar parser de texto plano
+            from app.services.epc_section_generator import generate_epc_by_sections
+            
+            log.info("[generate_epc] Usando generador por secciones (texto plano)")
+            data = await generate_epc_by_sections(hce_text, patient_id)
+        
+        # Extraer campos del resultado
+        motivo = data.get("motivo_internacion", "") or ""
+        diag_cie10 = data.get("diagnostico_principal_cie10", "") or ""
+        evolucion = data.get("evolucion", "") or ""
+        procedimientos = data.get("procedimientos", []) or []
+        interconsultas = data.get("interconsultas", []) or []
+        medicacion = data.get("medicacion", []) or []
+        indicaciones_alta = data.get("indicaciones_alta", []) or []
+        notas_alta = data.get("notas_alta", []) or []
+        
+        # ⚠️ POST-PROCESAMIENTO: Detectar óbito desde tipo_alta del episodio
+        try:
+            from app.services.epc_pre_validator import EPCPreValidator
+            from app.services.hce_ainstein_parser import HCEAinsteinParser
+            
+            # Parsear HCE para obtener tipo_alta
+            parser = HCEAinsteinParser()
+            parsed_hce = parser.parse_from_ainstein(hce)
+            
+            # Validar
+            validator = EPCPreValidator()
+            validation = validator.validate(parsed_hce)
+            
+            if validation.is_obito:
+                log.info(f"[generate_epc] ⚠️ ÓBITO detectado: tipo_alta={validation.tipo_alta_oficial}")
+                
+                # Vaciar indicaciones si es óbito
+                indicaciones_alta = []
+                notas_alta = []
+                
+                # Post-procesar evolución para remover contradicciones
+                from app.services.ai_langchain_service import _post_process_epc_result
+                post_result = _post_process_epc_result({
+                    "evolucion": evolucion,
+                    "indicaciones_alta": indicaciones_alta,
+                    "recomendaciones": notas_alta
+                })
+                evolucion = post_result.get("evolucion", evolucion)
+                
+                # Agregar marca de óbito a data
+                data["_is_obito"] = True
+                data["_tipo_alta"] = validation.tipo_alta_oficial
+        except Exception as post_err:
+            log.warning(f"[generate_epc] Error en post-procesamiento óbito: {post_err}")
+        
+        log.info(f"[generate_epc] Generación OK: meds={len(medicacion)}, procs={len(procedimientos)}")
+        
+    except Exception as section_err:
+        log.warning(f"[generate_epc] Falló generador: {section_err}, usando fallback")
+        import traceback
+        traceback.print_exc()
+        
+        # Fallback al método anterior
+        ai = GeminiAIService()
+        prompt = f"""Analiza el siguiente texto de HCE y genera una EPICRISIS en JSON.
+Campos: motivo_internacion, evolucion, procedimientos (lista), interconsultas (lista), 
+medicacion (lista con tipo/farmaco/dosis/via/frecuencia), indicaciones_alta, notas_alta.
+HCE: \"\"\"{hce_text[:12000]}\"\"\""""
+        
+        raw = await ai.generate_epc(prompt)
+        data = _json_from_ai(raw) or {}
+        
+        motivo = data.get("motivo_internacion", "") or ""
+        diag_cie10 = data.get("diagnostico_principal_cie10", "") or ""
+        evolucion = data.get("evolucion", "") or ""
+        procedimientos = data.get("procedimientos", []) or []
+        interconsultas = data.get("interconsultas", []) or []
+        medicacion = data.get("medicacion", []) or []
+        indicaciones_alta = data.get("indicaciones_alta", []) or []
+        notas_alta = data.get("notas_alta", []) or []
 
     # ------------------------------------------------------------------
-    # 3) Parsear salida de IA (incluyendo raw_text interno)
-    # ------------------------------------------------------------------
-    data = _json_from_ai(raw) or {}
-    if not isinstance(data, dict):
-        data = {}
-
-    if isinstance(data.get("raw_text"), str):
-        inner = _json_from_ai(data["raw_text"])
-        if isinstance(inner, dict):
-            for k, v in inner.items():
-                if k not in data:
-                    data[k] = v
-
-    # ------------------------------------------------------------------
-    # 4) Normalizar campos generados
+    # 3) Normalizar interconsultas (compatibilidad)
     # ------------------------------------------------------------------
     ts = _now().isoformat() + "Z"
-    motivo = data.get("motivo_internacion", "") or ""
-    diag_cie10 = data.get("diagnostico_principal_cie10", "") or ""
-    evolucion = data.get("evolucion", "") or ""
-
-    procedimientos = data.get("procedimientos", []) or []
-
-    raw_interconsultas = data.get("interconsultas", []) or []
-    interconsultas: List[str] = []
+    
+    # Convertir interconsultas a strings si son dicts
     interconsultas_detalle: List[Dict[str, Any]] = []
-    for item in raw_interconsultas:
-        if isinstance(item, dict):
-            interconsultas_detalle.append(item)
-            txt = item.get("resumen") or item.get("especialidad")
-            if not txt:
-                try:
-                    txt = json.dumps(item, ensure_ascii=False)
-                except Exception:
-                    txt = str(item)
-            interconsultas.append(_clean_str(txt))
-        else:
-            interconsultas.append(_clean_str(str(item)))
-
-    try:
-        data["interconsultas"] = interconsultas
-        data["interconsultas_detalle"] = interconsultas_detalle
-    except Exception:
-        pass
-
-    medicacion = data.get("medicacion", []) or []
-    indicaciones_alta = data.get("indicaciones_alta", []) or []
-    recomendaciones = data.get("recomendaciones", []) or []
+    if interconsultas and isinstance(interconsultas[0], dict):
+        interconsultas_detalle = interconsultas
+        interconsultas = [
+            ic.get("especialidad") or ic.get("resumen") or str(ic) 
+            for ic in interconsultas_detalle
+        ]
 
     provider = "gemini"
-    model = getattr(ai, "model", "gemini-2.0-flash")
+    model = "gemini-2.0-flash"
 
     generated_doc = {
         "provider": provider,
@@ -1180,12 +1414,13 @@ Formato EXACTO de salida (solo este JSON, sin texto adicional):
         "interconsultas_detalle": interconsultas_detalle,
         "medicacion": medicacion,
         "indicaciones_alta": indicaciones_alta,
-        "recomendaciones": recomendaciones,
+        "notas_alta": notas_alta,
+        "recomendaciones": notas_alta,  # Compatibilidad con frontend existente
         "data": data,
     }
 
     # ------------------------------------------------------------------
-    # 5) Persistir en Mongo y sincronizar estados SQL
+    # 4) Persistir en Mongo y sincronizar estados SQL
     # ------------------------------------------------------------------
     await mongo.epc_docs.update_one(
         {"_id": epc_id},
@@ -1317,75 +1552,17 @@ async def get_epc_pdf(
             allow_any=bool(getattr(settings, "EPC_FALLBACK_ANY_HCE", False)),
         )
 
-    structured = (hce or {}).get("structured") or {}
-    clinical: Dict[str, Any] = {
-        "admision_num": (
-            structured.get("admision_num")
-            or structured.get("admission_num")
-            or structured.get("numero_admision")
-            or structured.get("nro_admision")
-            or structured.get("Nro Admisión")
-            or structured.get("Nro Admision")
-        ),
-        "protocolo": (
-            structured.get("protocolo")
-            or structured.get("protocolo_num")
-            or structured.get("numero_protocolo")
-            or structured.get("Nro Protocolo")
-        ),
-        "fecha_ingreso": (
-            structured.get("fecha_ingreso")
-            or structured.get("fecha_admision")
-            or structured.get("ingreso_fecha")
-            or structured.get("Fecha Ingreso")
-            or structured.get("Fecha de Ingreso")
-        ),
-        "fecha_egreso": (
-            structured.get("fecha_egreso")
-            or structured.get("fecha_alta")
-            or structured.get("egreso_fecha")
-            or structured.get("Fecha Egreso")
-            or structured.get("Fecha de Egreso")
-        ),
-        "sector": (
-            structured.get("sector")
-            or structured.get("servicio")
-            or structured.get("unidad")
-            or structured.get("sector_internacion")
-            or structured.get("Sector")
-            or structured.get("Servicio")
-        ),
-        "habitacion": (
-            structured.get("habitacion")
-            or structured.get("hab")
-            or structured.get("habitacion_num")
-            or structured.get("nro_habitacion")
-            or structured.get("Habitacion")
-            or structured.get("Hab.")
-        ),
-        "cama": (
-            structured.get("cama")
-            or structured.get("cama_num")
-            or structured.get("nro_cama")
-            or structured.get("Cama")
-        ),
-        "numero_historia_clinica": (
-            structured.get("numero_historia_clinica")
-            or structured.get("nro_hc")
-            or structured.get("hc_numero")
-            or structured.get("historia_clinica")
-            or structured.get("Historia Clínica")
-            or structured.get("Nro Historia Clínica")
-        ),
-    }
-
+    # Usar nueva función de extracción de datos clínicos (SOLID)
+    clinical = _extract_clinical_data(hce) if hce else {}
+    
+    # Formatear fechas para display
     for key in ("fecha_ingreso", "fecha_egreso"):
         val = clinical.get(key)
         dt = _parse_dt_maybe(val)
         if dt:
             clinical[key + "_display"] = dt.strftime("%d/%m/%Y")
 
-    payload = _epc_pdf_payload_from_context(epc_doc=epc_doc, patient=patient, clinical=clinical)
+    payload = _epc_pdf_payload_from_context(epc_doc=epc_doc, patient=patient, clinical=clinical, hce=hce)
     pdf_bytes = build_epicrisis_pdf(payload)
 
     fname = f"epicrisis_{epc_id}.pdf"

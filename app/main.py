@@ -27,8 +27,17 @@ from app.routers.ingest import router as ingest_router
 # ✅ NUEVO: router de healthcheck
 from app.routers.health import router as health_router
 
+# ✅ NUEVO: router external API (multi-tenant)
+from app.routers.external import router as external_router
 
-app = FastAPI(title="EPC Suite", version="0.2.1")
+# ✅ NUEVO: middleware de tenant
+from app.core.tenant import TenantContextMiddleware
+
+
+app = FastAPI(title="EPC Suite", version="3.0.0")  # FERRO D2 v3.0.0
+
+# Middleware de tenant (antes de CORS)
+app.add_middleware(TenantContextMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,9 +64,22 @@ app.include_router(ingest_router)
 # ✅ NUEVO: healthcheck admin
 app.include_router(health_router)
 
+# ✅ NUEVO: external API para tenants
+app.include_router(external_router, prefix="/api/v1")
+
+# ✅ NUEVO: admin API para gestión de tenants
+from app.routers.tenants import router as tenants_router
+app.include_router(tenants_router)
+
 
 @app.on_event("startup")
 async def _startup():
+    # FERRO D2 v3.0.0: Initialize OpenTelemetry
+    from app.core.telemetry import init_telemetry, instrument_fastapi, Metrics
+    init_telemetry(service_name="ainstein-api")
+    instrument_fastapi(app)
+    Metrics.init()
+    
     # ping + índices en Mongo (idempotente)
     await ping()
     await ensure_indexes()
