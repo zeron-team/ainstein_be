@@ -577,7 +577,9 @@ async def generate_epc_by_sections(
     
     # 3. Generar motivo/evolución con IA
     ai = GeminiAIService()
-    prompt = PROMPT_MOTIVO_EVOLUCION.format(hce_text=hce_text[:15000])  # Limitar tamaño
+    # REGLA EXPLÍCITA: Recorrer 100% de la HCE sin truncar
+    # Gemini 2.0 Flash tiene 1M tokens, no hay límite práctico para HCEs típicas
+    prompt = PROMPT_MOTIVO_EVOLUCION.format(hce_text=hce_text)
     
     try:
         raw_result = await ai.generate_epc(prompt)

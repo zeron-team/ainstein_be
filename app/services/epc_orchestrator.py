@@ -1,5 +1,5 @@
 """
-EPC Orchestrator - Orquestación con LangChain para generación de EPCs
+EPC Orchestrator - Orquestación con LlamaIndex para generación de EPCs (FERRO D2 v4)
 
 Este módulo coordina toda la generación de EPCs:
 1. Parsea HCE desde JSON de Ainstein
@@ -9,7 +9,7 @@ Este módulo coordina toda la generación de EPCs:
 5. Retorna EPC completa
 
 Arquitectura:
-- LangChain para orquestación
+- LlamaIndex para orquestación (migrado desde LangChain)
 - Gemini 2.0 Flash como LLM
 - Prompts específicos por sección
 - Post-procesamiento con reglas fijas
@@ -21,8 +21,8 @@ import json
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.output_parsers import StrOutputParser
+# FERRO D2 v4: LlamaIndex (migrado desde LangChain)
+from llama_index.llms.gemini import Gemini
 
 from app.core.config import settings
 from app.services.hce_ainstein_parser import HCEAinsteinParser, ParsedHCE
@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 
 class EPCOrchestrator:
     """
-    Orquestador principal para generación de EPCs con LangChain.
+    Orquestador principal para generación de EPCs con LlamaIndex (FERRO D2 v4).
     
     Coordina:
     - Parsing de HCE
@@ -64,38 +64,36 @@ class EPCOrchestrator:
         if 'preview' in model_name.lower() or 'exp' in model_name.lower():
             model_name = 'gemini-2.0-flash'
         
-        # Configurar LLM de Gemini
-        self.llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=api_key,
+        # FERRO D2 v4: Configurar LLM con LlamaIndex Gemini
+        self.llm = Gemini(
+            model=f"models/{model_name}",
+            api_key=api_key,
             temperature=0.1,  # Bajo para consistencia clínica
-            convert_system_message_to_human=True
         )
         
         # Parser de HCE
         self.parser = HCEAinsteinParser()
         
-        # Output parser
-        self._output_parser = StrOutputParser()
-        
-        log.info("[EPCOrchestrator] Initialized with Gemini 2.0 Flash")
+        log.info("[EPCOrchestrator] Initialized with Gemini 2.0 Flash (LlamaIndex)")
     
     async def _run_chain(self, prompt, **kwargs) -> str:
         """
-        Ejecuta una chain usando LCEL (LangChain Expression Language).
-        Reemplaza el deprecated LLMChain.
+        Ejecuta una llamada al LLM con LlamaIndex (FERRO D2 v4).
+        Migrado desde LCEL de LangChain.
         
         Args:
-            prompt: PromptTemplate a usar
+            prompt: PromptTemplate a usar (LangChain format se convierte a string)
             **kwargs: Variables para el prompt
             
         Returns:
             String de respuesta del LLM
         """
-        # LCEL: prompt | llm | parser
-        chain = prompt | self.llm | self._output_parser
-        result = await chain.ainvoke(kwargs)
-        return result
+        # Formatear el prompt con los kwargs
+        formatted_prompt = prompt.format(**kwargs)
+        
+        # LlamaIndex API: acomplete en lugar de chain
+        response = await self.llm.acomplete(formatted_prompt)
+        return response.text
     
     async def generate_epc(
         self,
@@ -222,9 +220,10 @@ class EPCOrchestrator:
         if not motivo_text:
             motivo_text = parsed_hce.sections.ingreso or "No se registró texto de ingreso"
         
+        # REGLA EXPLÍCITA: No truncar - recorrer 100% de la HCE
         result = await self._run_chain(
             PROMPT_MOTIVO_REAL,
-            motivo_text=motivo_text[:4000]  # Suficiente contexto
+            motivo_text=motivo_text
         )
         
         return self._extract_from_json_response(result, "motivo_internacion")
@@ -238,10 +237,15 @@ class EPCOrchestrator:
         
         if not historia_completa:
             historia_completa = "No hay registros en la historia clínica."
-            
-        # Truncar sensato para evitar límites de tokens (Gemini 2.0 Flash tiene 1M, pero por seguridad)
-        if len(historia_completa) > 100000:
-            historia_completa = historia_completa[:100000] + "\n...[Historia truncada por longitud excesiva]..."
+        
+        # ========================================================================
+        # REGLA EXPLÍCITA: RECORRER 100% DE LA HCE SIN TRUNCAR
+        # Gemini 2.0 Flash tiene 1M tokens (~4M caracteres)
+        # Una HCE típica tiene 50K-200K caracteres, muy por debajo del límite
+        # ========================================================================
+        log.info(f"[EPCOrchestrator] Historia completa: {len(historia_completa)} caracteres (sin truncar)")
+        if len(historia_completa) > 500000:
+            log.warning(f"[EPCOrchestrator] Historia muy extensa: {len(historia_completa)} chars. Considerar optimización.")
             
         # 2. Determinar si es ÓBITO
         is_obito = hasattr(self, '_validation') and self._validation and self._validation.is_obito
@@ -336,7 +340,7 @@ class EPCOrchestrator:
         result = await self._run_chain(
             PROMPT_PLAN_TERAPEUTICO,
             indicaciones_text="\n".join(indicaciones_parts),
-            antecedentes_text=antecedentes[:5000]
+            antecedentes_text=antecedentes  # Sin truncar - 100% HCE
         )
         
         data = self._extract_from_json_response(result, None)  # Extraer root JSON

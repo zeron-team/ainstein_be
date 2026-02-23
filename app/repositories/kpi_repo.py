@@ -7,7 +7,7 @@ from typing import List, Dict
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.domain.models import Patient, EPC
+from app.domain.models import Patient, EPC, EPCEvent
 from app.repositories.patient_repo import PatientRepo  # por si lo necesitás en otros métodos
 import logging
 
@@ -83,23 +83,24 @@ class KPIRepo:
             else 0.0
         )
 
-        # KPIs de epicrisis (tabla EPC)
+        # KPIs de epicrisis (desde epc_events con action que contenga 'generada')
         hoy = date.today()
         inicio_mes = hoy.replace(day=1)
 
-        # Total de EPC registradas en tabla EPC
-        total_epc = int(
-            self.db.query(func.count(EPC.id)).scalar() or 0
-        )
+        # Columna de fecha para agrupar/filtrar
+        fecha_col = func.date(EPCEvent.at)
 
-        # Columna de fecha para agrupar/filtrar: preferimos fecha_emision, si no, created_at
-        fecha_col = func.date(
-            func.coalesce(EPC.fecha_emision, EPC.created_at)
+        # Total de EPC generadas (eventos con action que contenga 'generada')
+        total_epc = int(
+            self.db.query(func.count(EPCEvent.id))
+            .filter(EPCEvent.action.ilike('%generada%'))
+            .scalar() or 0
         )
 
         # EPC generadas hoy
         epc_hoy = int(
-            self.db.query(func.count(EPC.id))
+            self.db.query(func.count(EPCEvent.id))
+            .filter(EPCEvent.action.ilike('%generada%'))
             .filter(fecha_col == hoy)
             .scalar()
             or 0
@@ -107,7 +108,8 @@ class KPIRepo:
 
         # EPC generadas en el mes actual (desde el 1 del mes hasta hoy)
         epc_mes_actual = int(
-            self.db.query(func.count(EPC.id))
+            self.db.query(func.count(EPCEvent.id))
+            .filter(EPCEvent.action.ilike('%generada%'))
             .filter(fecha_col >= inicio_mes)
             .filter(fecha_col <= hoy)
             .scalar()

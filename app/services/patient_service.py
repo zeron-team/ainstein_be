@@ -59,12 +59,40 @@ class PatientService:
         return patient
 
     # ---------------------------
-    # Delete
+    # Delete (cascade: PostgreSQL + MongoDB)
     # ---------------------------
-    def delete(self, patient_id: str) -> None:
-        deleted = self.repo.delete(patient_id)
-        if not deleted:
+    async def delete(self, patient_id: str) -> None:
+        # 1. Verificar que el paciente existe
+        patient = self.repo.get(patient_id)
+        if not patient:
             raise HTTPException(status_code=404, detail="Paciente no encontrado")
+
+        # 2. Cascadear borrado en MongoDB (todas las colecciones con patient_id)
+        mongo_collections = [
+            "epc_docs", "epc_feedback", "epc_versions",
+            "hce_docs", "learning_rules", "learning_problems",
+        ]
+        total_deleted = 0
+        for coll_name in mongo_collections:
+            coll = mongo[coll_name]
+            result = await coll.delete_many({"patient_id": patient_id})
+            if result.deleted_count:
+                log.info("[PatientService] Deleted %d docs from %s for patient %s",
+                         result.deleted_count, coll_name, patient_id)
+                total_deleted += result.deleted_count
+
+        # 3. Borrar admissions de PostgreSQL
+        from app.domain.models import Admission
+        admissions = self.db.query(Admission).filter(Admission.patient_id == patient_id).all()
+        for adm in admissions:
+            self.db.delete(adm)
+        if admissions:
+            log.info("[PatientService] Deleted %d admissions for patient %s", len(admissions), patient_id)
+
+        # 4. Borrar paciente de PostgreSQL
+        self.repo.delete(patient_id)
+        log.info("[PatientService] Cascade delete complete for patient %s: %d MongoDB docs, %d admissions",
+                 patient_id, total_deleted, len(admissions))
 
     # ---------------------------
     # Alta manual

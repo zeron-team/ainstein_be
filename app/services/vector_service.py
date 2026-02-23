@@ -66,13 +66,14 @@ class VectorService:
     def _init_embeddings(self):
         """Inicializa el modelo de embeddings."""
         try:
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            # FERRO D2 v4: LlamaIndex embeddings (migrado desde LangChain)
+            from llama_index.embeddings.gemini import GeminiEmbedding
             
-            self._embeddings = GoogleGenerativeAIEmbeddings(
-                model="models/text-embedding-004",
-                google_api_key=settings.GEMINI_API_KEY,
+            self._embeddings = GeminiEmbedding(
+                model_name="models/text-embedding-004",
+                api_key=settings.GEMINI_API_KEY,
             )
-            log.info("[VectorService] Embeddings initialized with text-embedding-004")
+            log.info("[VectorService] Embeddings initialized with text-embedding-004 (LlamaIndex)")
         except Exception as e:
             log.warning("[VectorService] Failed to init embeddings: %s", e)
             raise
@@ -109,11 +110,13 @@ class VectorService:
     
     async def embed_text(self, text: str) -> List[float]:
         """Genera embedding para un texto."""
-        return self.embeddings.embed_query(text)
+        # LlamaIndex API: get_text_embedding en lugar de embed_query
+        return self.embeddings.get_text_embedding(text)
     
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """Genera embeddings para múltiples textos."""
-        return self.embeddings.embed_documents(texts)
+        # LlamaIndex API: get_text_embedding_batch en lugar de embed_documents
+        return self.embeddings.get_text_embedding_batch(texts)
     
     async def add_hce_chunk(
         self,

@@ -112,25 +112,59 @@ RESPONDE SOLO CON JSON:
 )
 
 # =============================================================================
-# 4. PROCEDIMIENTOS (LISTA INTELIGENTE)
+# 4. PROCEDIMIENTOS REALIZADOS (LISTA INTELIGENTE)
 # =============================================================================
 PROMPT_PROCEDIMIENTOS = PromptTemplate(
-    template="""Genera la lista de PROCEDIMIENTOS realizados.
+    template="""Genera la lista de PROCEDIMIENTOS REALIZADOS durante la internación.
+
+DEFINICIÓN DE PROCEDIMIENTO:
+Toda intervención diagnóstica o terapéutica efectivamente realizada al paciente, que implique una acción clínica identificable, con fecha/hora, responsable/servicio, y resultado.
 
 ENTRADA:
 {procedimientos_list}
 
-REGLAS DE FILTRADO:
-1. ELIMINAR rutinas de enfermería irrelevantes: "Higienes", "Control signos vitales", "Cambio de pañal", "Curación plana" (salvo que sea cirugía).
-2. MANTENER: Cirugías, Accesos venosos centrales, Intubación, Sondajes, Transfusiones, Estudios de imagen (Rx, TC, Eco), Biopsias.
-3. SINTETIZAR: Si hay múltiples "Curaciones", poner solo una vez "Curaciones de herida quirúrgica".
+═══════════════════════════════════════════════════════════════
+✅ QUÉ INCLUIR (OBLIGATORIO detectar y listar):
+═══════════════════════════════════════════════════════════════
+• QUIRÚRGICOS: Cirugía mayor/menor, toilette, sutura, drenaje, desbridamiento
+• INTERVENCIONISTAS: Cateterismo, angioplastia, colocación de stent, biopsia guiada
+• ENDOSCÓPICOS: VEDA (Videoendoscopía Digestiva Alta), colonoscopía, broncoscopía, CPRE
+• DISPOSITIVOS/ACCESOS: Vía central, PICC, sonda vesical, SNG, intubación (IOT), traqueostomía
+• TERAPÉUTICOS: Transfusión, diálisis, ventilación mecánica, cardioversión, RCP
+• DIAGNÓSTICOS RELEVANTES: Punción lumbar, artrocentesis, toracocentesis, paracentesis
 
-FORMATO DE SALIDA (Lista de Strings):
-- "- [Fecha] Procedimiento"
-- IMPORTANTE: No incluyas laboratorios aquí (se manejan aparte).
+═══════════════════════════════════════════════════════════════
+❌ QUÉ NO ES PROCEDIMIENTO (NO incluir):
+═══════════════════════════════════════════════════════════════
+• Medicaciones (ATB, analgesia) → van en Plan Terapéutico
+• Laboratorio rutinario → va en Estudios
+• Rx simple sin intervención → va en Estudios
+• Conductas generales ("observación", "control") → va en Evolución
+• Diagnósticos → van en Diagnóstico de ingreso/egreso
+
+═══════════════════════════════════════════════════════════════
+📋 REGLAS OBLIGATORIAS:
+═══════════════════════════════════════════════════════════════
+1. Listar SOLO lo realizado (no lo indicado ni lo planificado)
+2. Si usa SIGLA, aclararla: "VEDA (Videoendoscopía Digestiva Alta)"
+3. Ordenar cronológicamente
+4. Incluir: nombre, fecha/hora, servicio, motivo, hallazgos, complicaciones
+
+═══════════════════════════════════════════════════════════════
+📌 FORMATO OBLIGATORIO POR PROCEDIMIENTO:
+═══════════════════════════════════════════════════════════════
+"DD/MM/YYYY HH:MM - [Servicio] Nombre del procedimiento. Motivo: X. Hallazgos: Y. Complicaciones: ninguna/Z."
+
+EJEMPLO:
+"15/01/2026 10:30 - [Endoscopía] VEDA (Videoendoscopía Digestiva Alta). Motivo: Hemorragia digestiva alta. Hallazgos: Úlcera gástrica Forrest IIb, se realiza esclerosis. Complicaciones: ninguna."
+
+═══════════════════════════════════════════════════════════════
 
 RESPONDE SOLO CON JSON:
-{{"procedimientos": ["- [DD/MM] Procedimiento 1", "- [DD/MM] Procedimiento 2"]}}
+{{"procedimientos": ["procedimiento 1 con formato completo", "procedimiento 2 con formato completo"]}}
+
+SI NO HAY PROCEDIMIENTOS:
+{{"procedimientos": [], "mensaje": "No se registran procedimientos invasivos/intervencionistas durante la internación."}}
 """,
     input_variables=["procedimientos_list"]
 )

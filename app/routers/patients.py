@@ -164,9 +164,9 @@ def update_patient(patient_id: str, payload: PatientCreate, db: Session = Depend
     status_code=204,
     dependencies=[Depends(role_required("admin"))],
 )
-def delete_patient(patient_id: str, db: Session = Depends(get_db)):
+async def delete_patient(patient_id: str, db: Session = Depends(get_db)):
     svc = PatientService(db)
-    svc.delete(patient_id)
+    await svc.delete(patient_id)
     return {"ok": True}
 
 # ---------------------------

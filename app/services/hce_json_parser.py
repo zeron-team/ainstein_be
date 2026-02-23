@@ -363,8 +363,60 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
             
             obs = proc.get("enprObservacion", "") or ""
             
-            # NOTA: No agregar interconsultas desde procedimientos
-            # Las interconsultas solo vienen del tipo de registro "EVOLUCION DE INTERCONSULTA"
+            # Si el procedimiento es una INTERCONSULTA, agregarlo también a interconsultas
+            desc_upper = descripcion.upper()
+            if "INTERCONSULTA" in desc_upper:
+                # Detectar especialidad de la descripción
+                especialidad = "Clínica Médica"  # Por defecto
+                desc_lower = descripcion.lower()
+                if "cardiolog" in desc_lower:
+                    especialidad = "Cardiología"
+                elif "neurolog" in desc_lower:
+                    especialidad = "Neurología"
+                elif "nefrolog" in desc_lower:
+                    especialidad = "Nefrología"
+                elif "cirugia" in desc_lower or "quirurgic" in desc_lower:
+                    especialidad = "Cirugía General"
+                elif "traumatolog" in desc_lower or "ortoped" in desc_lower:
+                    especialidad = "Traumatología"
+                elif "hematolog" in desc_lower:
+                    especialidad = "Hematología"
+                elif "infectolog" in desc_lower:
+                    especialidad = "Infectología"
+                elif "neumolog" in desc_lower:
+                    especialidad = "Neumonología"
+                elif "kinesiol" in desc_lower or "kine" in desc_lower or "fisiatra" in desc_lower:
+                    especialidad = "Kinesiología"
+                elif "gastroenter" in desc_lower:
+                    especialidad = "Gastroenterología"
+                elif "endocrino" in desc_lower:
+                    especialidad = "Endocrinología"
+                elif "urologo" in desc_lower or "urolog" in desc_lower:
+                    especialidad = "Urología"
+                elif "otorrino" in desc_lower or "orl" in desc_lower:
+                    especialidad = "Otorrinolaringología"
+                elif "dermato" in desc_lower:
+                    especialidad = "Dermatología"
+                elif "psiquiat" in desc_lower:
+                    especialidad = "Psiquiatría"
+                elif "psicolog" in desc_lower:
+                    especialidad = "Psicología"
+                elif "nutricion" in desc_lower or "nutriolog" in desc_lower:
+                    especialidad = "Nutrición"
+                elif "paliativ" in desc_lower:
+                    especialidad = "Cuidados Paliativos"
+                else:
+                    # Intentar extraer especialidad del nombre del procedimiento
+                    # Ej: "INTERCONSULTA A INFECTOLOGIA" -> "Infectología"
+                    match = re.search(r'INTERCONSULTA\s+(?:A\s+)?(\w+)', descripcion, re.IGNORECASE)
+                    if match:
+                        especialidad = match.group(1).capitalize()
+                
+                result["interconsultas"].append({
+                    "fecha": fecha_str,
+                    "especialidad": especialidad,
+                    "observacion": obs or descripcion,
+                })
             
             result["procedimientos"].append({
                 "fecha": fecha_str,
@@ -531,7 +583,10 @@ def sort_medications_alphabetically(medications: List[Dict[str, Any]]) -> List[D
     
     return internacion + previa
 
-def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
+def sort_and_group_procedures(
+    procedures: List[Dict[str, Any]],
+    excluded_sections: Optional[List[str]] = None,
+) -> List[str]:
     """
     Filtra y ordena procedimientos para mostrar SOLO los clínicamente relevantes.
     
@@ -554,6 +609,7 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
     
     # =========================================================================
     # LISTA NEGRA EXTENSA DE PROCEDIMIENTOS GENÉRICOS A OCULTAR
+    # Según REGLAS_GENERACION_EPC.md: NO son procedimientos invasivos/intervencionistas
     # =========================================================================
     GENERIC_PROCEDURES_BLACKLIST = [
         # Administrativo / Ingreso
@@ -570,12 +626,28 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
         # Alimentación (rutinario)
         "ALIMENTACION ENTERAL",
         
-        # Rutinas de enfermería
-        "SONDA NASOGASTRICA", "ASPIRACION SECRECIONES",
+        # Rutinas de enfermería - NO SON PROCEDIMIENTOS
+        "SONDA NASOGASTRICA",
+        "ASPIRACION SECRECIONES", "ASPIRACION DE SECRECIONES",
+        "DRENAJE - CONTROL", "DRENAJE CONTROL", "CONTROL Y MEDICION",
+        "SUJECION DEL TUBO", "SUJECION DE TUBO", "FIJACION DEL TUBO",
+        "HIGIENE", "HIGIENE CONFORT", "BAÑO EN CAMA",
+        "CAMBIO DE POSICION", "MOVILIZACION PASIVA",
+        "CURACION PLANA", "CURACION SIMPLE",
+        "CAMBIO DE PAÑAL", "CONTROL DE DEPOSICIONES",
+        "CONTROL DEL DOLOR", "ESCALA DE DOLOR",
+        "MEDICION DE DIURESIS", "BALANCE HIDRICO",
         
-        # Controles genéricos
+        # Controles genéricos - NO SON PROCEDIMIENTOS
         "CONTROL DE", "SIGNOS VITALES", "SATURACION", "TEMPERATURA",
         "FRECUENCIA CARDIACA", "FRECUENCIA RESPIRATORIA",
+        "TENSION ARTERIAL", "PRESION ARTERIAL",
+        "VALORACION INICIAL", "VALORACION DE ENFERMERIA",
+        "MONITOREO CONTINUO", "MONITOREO CARDIACO",
+        
+        # Observación/Conductas - van en Evolución, no en Procedimientos
+        "OBSERVACION", "CONTROL EVOLUTIVO", "SEGUIMIENTO",
+        "EVALUACION CLINICA", "VALORACION CLINICA",
     ]
     
     # Keywords para identificar laboratorios (se agrupan)
@@ -593,11 +665,13 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
     ]
     
     # Categorías que se OCULTAN completamente (no mostrar ni agrupar)
-    hidden_categories = {
+    # Si se pasan excluded_sections, usar esas; sino usar defaults
+    default_hidden = {
         "control", "higiene", "enfermeria", 
         "valoracion", "medicacion_admin", "valoracion_clinica",
         "interconsulta",  # Ya están en su sección
     }
+    hidden_categories = set(excluded_sections) if excluded_sections else default_hidden
     
     def parse_date(p):
         fecha = p.get("fecha", "")
@@ -618,6 +692,7 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
     
     # Contadores para agrupación
     lab_count = 0
+    lab_items = []  # Guardar laboratorios individuales para enviar al frontend
     akm_count = 0
     
     # Procedimientos importantes individuales
@@ -626,12 +701,17 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
     for p in procedures:
         categoria = p.get("categoria", "otro")
         descripcion = p.get("descripcion", "")
+        fecha = p.get("fecha", "")
         desc_upper = descripcion.upper()
         
         # 1. Verificar si es laboratorio - AGRUPAR, no mostrar individualmente
         if categoria == "laboratorio" or is_lab_procedure(descripcion):
             lab_count += 1
-            continue  # No agregar individualmente, se agrupa al final
+            if fecha and descripcion:
+                lab_items.append(f"{fecha} - {descripcion}")
+            elif descripcion:
+                lab_items.append(descripcion)
+            continue  # No agregar individualmente en procedimientos, se agrupa al final
         
         # 2. Verificar si está en lista negra de genéricos
         if is_blacklisted(descripcion):
@@ -646,6 +726,20 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
             akm_count += 1
             continue
         
+        # 4b. EXCLUIR estudios de imagen (van en sección "Estudios" separada)
+        STUDY_KEYWORDS = [
+            "RX ", "RADIOGRAFIA", "TAC ", "TOMOGRAFIA", "RMN ", "RESONANCIA",
+            "ECOGRAFIA", "ECOCARDIOGRAMA", "CENTELLOGRAMA", "SPECT",
+            "MAMOGRAFIA", "DENSITOMETRIA", "DOPPLER", "ECODOPLER", "ECODOPPLER",
+            "VEDA ", "VCC", "ENDOSCOPIA DIGESTIVA", "COLONOSCOPIA", "BRONCOSCOPIA",
+            "ELECTROCARDIOGRAMA", "ECG", "HOLTER", "ERGOMETRIA",
+        ]
+        is_study = any(kw in desc_upper for kw in STUDY_KEYWORDS)
+        # Solo excluir si NO es biopsia/punción (esos son procedimientos)
+        is_invasive = any(kw in desc_upper for kw in ["BIOPSIA", "PUNCION", "COLOCACION", "CATETERISMO"])
+        if is_study and not is_invasive:
+            continue  # Este estudio va en la sección "Estudios"
+        
         # 5. Más keywords a ocultar (rutina que no entra en categorías)
         skip_keywords = [
             "OBSERVACION", "SUEÑO", "REPOSO", "PASE DE", 
@@ -655,6 +749,7 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
             "VALORACION DLEE", "VALORACION DE", "VALORACION DEL",
             "PULSERA", "TRASLADO", "CABECERA", "BARANDAS",
             "DECUBITO", "ALMOHADA", "CHATA", "ORINAL",
+            "INTERCONSULTA",  # Las interconsultas van en su sección propia
         ]
         
         should_skip = any(kw in desc_upper for kw in skip_keywords)
@@ -695,17 +790,243 @@ def sort_and_group_procedures(procedures: List[Dict[str, Any]]) -> List[str]:
     if akm_count > 0:
         result.append(f"Asistencia kinésica motora durante la internación ({akm_count} sesiones)")
     
+    print(f"[PostProcess] Procedimientos finales: {len(result)} items")
+    for i, item in enumerate(result[:5]):  # Mostrar primeros 5
+        print(f"  [{i}] {item[:80]}...")
+    
     return result
 
 
-def sort_procedures_chronologically(procedures: List[Dict[str, Any]]) -> List[str]:
+def sort_procedures_chronologically(
+    procedures: List[Dict[str, Any]],
+    excluded_sections: Optional[List[str]] = None,
+) -> List[str]:
     """Alias para compatibilidad - usa la nueva función de agrupación."""
-    return sort_and_group_procedures(procedures)
+    return sort_and_group_procedures(procedures, excluded_sections)
+
+
+def extract_lab_procedures(
+    procedures: List[Dict[str, Any]],
+) -> List[str]:
+    """
+    Extrae LABORATORIOS individuales de los procedimientos.
+    
+    Estos laboratorios normalmente se agrupan en un solo item para la sección
+    de procedimientos, pero el frontend necesita acceso a la lista completa
+    para mostrar en el modal de "Otros Datos de Interés".
+    
+    Returns:
+        Lista de strings en formato "DD/MM/YYYY HH:MM - DESCRIPCION"
+    """
+    LAB_KEYWORDS = [
+        "LABORATORIO", "HEMOGRAMA", "GLUCEMIA", "CREATININA", "UREMIA", 
+        "IONOGRAMA", "HEPATOGRAMA", "COAGULOGRAMA", "CALCEMIA", "MAGNESIO",
+        "LACTICO", "LÁCTICO", "LDH", "FOSFATEMIA", "ACIDO BASE", "ÁCIDO BASE",
+        "GASOMETRIA", "GASOMETRÍA", "COLESTEROL", "TRIGLICERIDOS", "TRIGLICÉRIDOS",
+        "URICEMIA", "BILIRRUBINA", "PROTEINAS", "PROTEÍNAS", "ALBUMINA", "ALBÚMINA",
+        "AMILASA", "LIPASA", "PCR", "VSG", "ERITROSEDIMENTACION", "ERITROSEDIMENTACIÓN",
+        "FERRITINA", "TRANSFERRINA", "VITAMINA", "HORMONAS", "TSH", "T3", "T4",
+        "HISOPADO", "HEMOCULTIVO", "UROCULTIVO", "COPROCULTIVO", "CULTIVO",
+        "CALCIO IONICO", "CALCIO IÓNICO", "FOSFORO", "FÓSFORO",
+        "POTASIO", "SODIO", "CLORO", "BICARBONATO", "UREA",
+        "TRANSAMINASAS", "GOT", "GPT", "FOSFATASA", "GGT", "GAMMA GT",
+        "TIEMPO DE PROTROMBINA", "TPPA", "DIMERO D", "FIBRINOGENO", "FIBRINÓGENO",
+    ]
+    
+    def is_lab(descripcion: str) -> bool:
+        desc_upper = descripcion.upper()
+        return any(kw in desc_upper for kw in LAB_KEYWORDS)
+    
+    def parse_date(p):
+        fecha = p.get("fecha", "")
+        try:
+            return datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+        except:
+            return datetime.max
+    
+    # Filtrar solo laboratorios
+    labs = [p for p in procedures if p.get("categoria") == "laboratorio" or is_lab(p.get("descripcion", ""))]
+    
+    # Agrupar por descripción (sin fecha/hora) - solo valores únicos
+    seen = set()
+    result = []
+    for p in labs:
+        descripcion = p.get("descripcion", "").strip()
+        if descripcion and descripcion.upper() not in seen:
+            seen.add(descripcion.upper())
+            result.append(descripcion)
+    
+    # Ordenar alfabéticamente para mejor lectura
+    result.sort()
+    
+    return result
+
+
+def extract_studies_chronologically(
+    procedures: List[Dict[str, Any]],
+    excluded_sections: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Extrae ESTUDIOS DIAGNÓSTICOS agrupados por tipo.
+    
+    REGLA: Agrupar por tipo de estudio, mostrar solo la primera fecha/hora de cada tipo.
+    Ejemplo: Si hay 8 "Tránsito intestinal", solo aparece 1 con la primera fecha.
+    
+    Usa el módulo estudios_rules.py que define 11 categorías:
+    - Diagnóstico por Imágenes (RX, TAC, RMN, Eco, Doppler, etc.)
+    - Cardiología (ECG, Holter, CCG, etc.)
+    - Neurología (EEG, EMG, etc.)
+    - Neumonología (Espirometría, etc.)
+    - Endoscopía (VEDA, VCC, etc.)
+    - Oftalmología, Traumatología, ORL, Ginecología, Urología, Genética
+    
+    Returns:
+        Lista de strings en formato "DD/MM/YYYY HH:MM - ESTUDIO" (agrupados por tipo)
+    """
+    from app.services.estudios_rules import clasificar_estudio, es_estudio
+    
+    # Keywords para EXCLUIR de Estudios (son PROCEDIMIENTOS, no estudios)
+    # Según Tabla de Decisión: endoscopías, invasivos/intervencionistas → Procedimientos
+    EXCLUDE_KEYWORDS = [
+        # Quirúrgicos/Invasivos
+        "BIOPSIA", "PUNCION", "COLOCACION", "EXTRACCION", "CIRUGIA",
+        "ANGIOPLASTIA", "STENT", "MARCAPASOS", "DRENAJE", "CATETER",
+        # Intervencionismos cardíacos
+        "ABLACION", "ABLACIÓN",  # ⚠️ Ablación por catéter = procedimiento intervencionista
+        "CATETERISMO", "HEMODINAMIA",
+        # Endoscopías → van a PROCEDIMIENTOS (son invasivas)
+        "VEDA", "VIDEOENDOSCOPIA", "ENDOSCOPIA DIGESTIVA ALTA",
+        "COLONOSCOPIA", "VCC", "VIDEOCOLONOSCOPIA",
+        "CPRE", "COLANGIOPANCREATOGRAFIA",
+        "BRONCOSCOPIA", "FIBROBRONCOSCOPIA",
+        # Accesos/Dispositivos
+        "CVC", "VIA CENTRAL", "PICC", "INTUBACION", "IOT",
+        # Terapéuticos invasivos
+        "TRANSFUSION", "DIALISIS", "CARDIOVERSION", "RCP", "DESFIBRILACION",
+    ]
+    
+    def is_study(descripcion: str) -> bool:
+        """Determina si es un estudio diagnóstico usando reglas estándar."""
+        desc_upper = descripcion.upper()
+        
+        # Verificar si tiene keywords de exclusión
+        if any(kw in desc_upper for kw in EXCLUDE_KEYWORDS):
+            return False
+        
+        # Usar el clasificador de estudios
+        return es_estudio(descripcion)
+    
+    def parse_date(p):
+        fecha = p.get("fecha", "")
+        try:
+            return datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+        except:
+            return datetime.max
+    
+    # Filtrar solo estudios
+    studies = [p for p in procedures if is_study(p.get("descripcion", ""))]
+    
+    # Ordenar cronológicamente (para que el primero de cada tipo sea el más antiguo)
+    studies.sort(key=parse_date)
+    
+    # Agrupar por tipo de estudio (nombre normalizado)
+    # Diccionario: nombre_normalizado -> (primera_fecha, descripcion_original)
+    estudios_por_tipo: dict = {}
+    
+    for p in studies:
+        fecha = p.get("fecha", "")
+        descripcion = p.get("descripcion", "")
+        
+        # Clasificar el estudio para obtener nombre normalizado
+        clasificacion = clasificar_estudio(descripcion)
+        if clasificacion:
+            nombre_norm = clasificacion["nombre"]
+        else:
+            # Si no se puede clasificar, usar descripción original (normalizada)
+            nombre_norm = descripcion.strip()
+        
+        # Solo guardar la primera ocurrencia (ya está ordenado cronológicamente)
+        if nombre_norm not in estudios_por_tipo:
+            estudios_por_tipo[nombre_norm] = fecha
+    
+    # Construir resultado ordenado por primera fecha
+    result_items = []
+    for nombre, fecha in estudios_por_tipo.items():
+        if fecha:
+            # Parsear fecha para ordenar
+            try:
+                dt = datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+            except:
+                dt = datetime.max
+            result_items.append((dt, f"{fecha} - {nombre}"))
+        else:
+            result_items.append((datetime.max, nombre))
+    
+    # Ordenar por fecha
+    result_items.sort(key=lambda x: x[0])
+    
+    return [item[1] for item in result_items]
+
+
+
+
+def extract_interconsultas_chronologically(
+    interconsultas: List[Dict[str, Any]],
+) -> List[str]:
+    """
+    Formatea INTERCONSULTAS agrupadas por especialidad.
+    
+    REGLA: Agrupar por especialidad, mostrar solo la primera fecha/hora de cada una.
+    Ejemplo: Si hay 3 interconsultas a "Infectología", solo aparece 1 con la primera fecha.
+    
+    Returns:
+        Lista de strings en formato "DD/MM/YYYY HH:MM - Especialidad" (agrupados)
+    """
+    def parse_date(ic):
+        fecha = ic.get("fecha", "")
+        try:
+            return datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+        except:
+            return datetime.max
+    
+    # Ordenar cronológicamente (para que la primera de cada especialidad sea la más antigua)
+    sorted_ic = sorted(interconsultas, key=parse_date)
+    
+    # Agrupar por especialidad - solo guardar primera ocurrencia de cada una
+    # Diccionario: especialidad -> primera_fecha
+    ic_por_especialidad: dict = {}
+    
+    for ic in sorted_ic:
+        fecha = ic.get("fecha", "")
+        especialidad = ic.get("especialidad", "Clínica Médica").strip()
+        
+        # Solo guardar la primera ocurrencia de cada especialidad
+        if especialidad not in ic_por_especialidad:
+            ic_por_especialidad[especialidad] = fecha
+    
+    # Construir resultado ordenado por primera fecha
+    result_items = []
+    for especialidad, fecha in ic_por_especialidad.items():
+        if fecha:
+            try:
+                dt = datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+            except:
+                dt = datetime.max
+            result_items.append((dt, f"{fecha} - {especialidad}"))
+        else:
+            result_items.append((datetime.max, especialidad))
+    
+    # Ordenar por fecha
+    result_items.sort(key=lambda x: x[0])
+    
+    return [item[1] for item in result_items]
 
 
 async def generate_epc_from_json(
     hce_doc: Dict[str, Any],
     patient_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    db: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Genera EPC desde documento HCE JSON estructurado.
@@ -713,13 +1034,26 @@ async def generate_epc_from_json(
     Args:
         hce_doc: Documento HCE de MongoDB (con estructura ainstein)
         patient_id: ID del paciente (opcional)
+        tenant_id: ID del tenant para aplicar reglas de visualización (opcional)
+        db: Sesión de SQLAlchemy para obtener reglas del tenant (opcional)
         
     Returns:
         Dict con estructura EPC completa
     """
     from app.services.ai_gemini_service import GeminiAIService
+    from app.services.tenant_rules_service import get_excluded_sections_for_tenant, DEFAULT_EXCLUDED_SECTIONS
     
     log.info("[EPC-JSON] Generando EPC desde JSON estructurado")
+    
+    # =========================================================================
+    # OBTENER REGLAS DE EXCLUSIÓN DEL TENANT
+    # =========================================================================
+    if db and tenant_id:
+        excluded_sections = get_excluded_sections_for_tenant(db, tenant_id)
+    else:
+        # Usar defaults si no hay db o tenant_id
+        excluded_sections = DEFAULT_EXCLUDED_SECTIONS.copy()
+    log.info(f"[EPC-JSON] Tenant {tenant_id}: excluyendo secciones {excluded_sections}")
     
     # 1. Parsear documento JSON
     parsed = parse_hce_json(hce_doc)
@@ -741,12 +1075,27 @@ async def generate_epc_from_json(
     print(f"[EPC-JSON] Diagnósticos: {parsed['diagnosticos']}")
     print(f"[EPC-JSON] Motivo internación: {parsed['motivo_internacion']}")
     print(f"[EPC-JSON] Tipo de alta: {tipo_alta} (es_obito: {es_obito_por_alta})")
+    print(f"[EPC-JSON] Secciones excluidas por tenant: {excluded_sections}")
     
     # 2. Ordenar medicación alfabéticamente
     sorted_meds = sort_medications_alphabetically(parsed["medicacion"])
     
-    # 3. Ordenar procedimientos cronológicamente
-    sorted_procs = sort_procedures_chronologically(parsed["procedimientos"])
+    # 3. Ordenar y FILTRAR procedimientos según reglas del tenant
+    sorted_procs = sort_procedures_chronologically(parsed["procedimientos"], excluded_sections)
+    
+    # 3b. Extraer ESTUDIOS diagnósticos (TAC, RMN, RX, etc.) - nueva sección
+    sorted_studies = extract_studies_chronologically(parsed["procedimientos"], excluded_sections)
+    
+    # 3c. Extraer LABORATORIOS individuales para modal "Otros Datos de Interés"
+    lab_procedures = extract_lab_procedures(parsed["procedimientos"])
+    
+    # 3d. Extraer INTERCONSULTAS en orden cronológico
+    sorted_interconsultas = extract_interconsultas_chronologically(parsed.get("interconsultas", []))
+    
+    print(f"[EPC-JSON] Procedimientos después de filtrar: {len(sorted_procs)}")
+    print(f"[EPC-JSON] Estudios extraídos: {len(sorted_studies)}")
+    print(f"[EPC-JSON] Laboratorios extraídos: {len(lab_procedures)}")
+    print(f"[EPC-JSON] Interconsultas extraídas: {len(sorted_interconsultas)}")
     
     # 4. Generar evolución con IA si hay datos
     motivo = parsed["motivo_internacion"]
@@ -787,62 +1136,66 @@ async def generate_epc_from_json(
         
         # Generar evolución con IA
         ai = GeminiAIService()
-        prompt = f"""
-Genera un texto de EVOLUCIÓN médica para una epicrisis basado en estos datos:
+        
+        # Determinar si es óbito desde la fuente de verdad (taltDescripcion)
+        tipo_alta_texto = tipo_alta if tipo_alta else "ALTA"
+        es_obito_confirmado = es_obito_por_alta
+        
+        prompt = f"""Eres un médico especialista redactando la sección EVOLUCIÓN de una epicrisis.
 
-PACIENTE: {paciente_info if paciente_info else 'No especificado'}
-MOTIVO INTERNACIÓN: {motivo if motivo else 'No especificado'}
-DIAGNÓSTICOS: {todos_diagnosticos}
-PROCEDIMIENTOS REALIZADOS: {todos_procedimientos}
-PARTE QUIRÚRGICO: {parsed['parte_quirurgico'] if parsed['parte_quirurgico'] else 'N/A'}
+DATOS DEL CASO:
+- PACIENTE: {paciente_info if paciente_info else 'No especificado'}
+- MOTIVO INTERNACIÓN: {motivo if motivo else 'No especificado'}
+- DIAGNÓSTICOS: {todos_diagnosticos}
+- PROCEDIMIENTOS REALIZADOS: {todos_procedimientos}
+- PARTE QUIRÚRGICO: {parsed['parte_quirurgico'] if parsed['parte_quirurgico'] else 'N/A'}
+- TIPO DE ALTA: {tipo_alta_texto}
 
-EVOLUCIONES MÉDICAS REGISTRADAS (TEXTO COMPLETO):
+EVOLUCIONES MÉDICAS REGISTRADAS:
 {context}
 
 ═══════════════════════════════════════════════════════════════
-⛔⛔⛔ REGLA CRÍTICA DE FALLECIMIENTO - NO NEGOCIABLE ⛔⛔⛔
+INSTRUCCIONES DE REDACCIÓN (MÁXIMA PRIORIDAD)
 ═══════════════════════════════════════════════════════════════
 
-Esta es la regla MÁS IMPORTANTE. DEBES verificarla ANTES de generar la respuesta.
+DEBES generar un texto narrativo COMPLETO con la siguiente estructura obligatoria de 3-4 párrafos:
 
-SI en CUALQUIER evolución aparece:
-- "fallece", "falleció", "fallecio", "falleciendo"
-- "óbito", "obito", "obitó", "éxitus", "exitus"
-- "murió", "murio", "defunción"
-- "constata", "se constata" (común: "se constata óbito")
-- "paro cardiorrespiratorio"
-- "maniobras de reanimación", "RCP"
-- "sin respuesta a maniobras"
-- CUALQUIER indicación explícita o implícita de muerte
+PÁRRAFO 1 - INGRESO Y ANTECEDENTES:
+- Comenzar SIEMPRE con "{paciente_info}, " seguido de antecedentes relevantes
+- Incluir motivo de internación, comorbilidades, medicación habitual relevante
+- Describir el estado al ingreso
 
-ENTONCES el ÚLTIMO PÁRRAFO OBLIGATORIAMENTE DEBE comenzar con:
+PÁRRAFO 2 - EVOLUCIÓN CLÍNICA:
+- Narrar cronológicamente la evolución durante la internación
+- Incluir hallazgos de estudios realizados (laboratorios, imágenes, etc.)
+- Describir interconsultas relevantes y sus conclusiones
+- Mencionar procedimientos realizados (sin detallar fármacos específicos)
 
-"PACIENTE OBITÓ - Fecha: {{fecha}} Hora: {{hora}}. {{descripción}}"
+PÁRRAFO 3 - COMPLICACIONES Y TRATAMIENTO:
+- Describir complicaciones si las hubo
+- Mencionar cambios en el plan terapéutico (sin nombrar fármacos individuales)
+- Incluir respuesta al tratamiento
+- Si no hubo complicaciones relevantes, fusionar con párrafo 2
 
-⚠️ IMPORTANTE: Busca la FECHA y HORA del fallecimiento en el texto. Si no está explícita, usa "hora no registrada".
+PÁRRAFO FINAL - DESENLACE:
+{f'''- El paciente FALLECIÓ durante la internación (tipo de alta: ÓBITO)
+- Describir el deterioro clínico previo al fallecimiento basándote en las evoluciones
+- La ÚLTIMA línea del texto debe ser exactamente: "DESENLACE: ÓBITO - Fecha: [fecha del óbito si la hay en las evoluciones] | Hora: [hora si disponible]"
+- Si no hay fecha exacta en las evoluciones, escribir: "DESENLACE: ÓBITO - Fecha: no registrada"''' if es_obito_confirmado else '''- El paciente fue dado de ALTA (NO falleció)
+- Describir la condición al alta, mejoría clínica
+- NUNCA mencionar fallecimiento, óbito, muerte ni términos similares
+- El desenlace debe ser coherente con un alta médica'''}
 
-EJEMPLOS CORRECTOS:
-✓ "PACIENTE OBITÓ - Fecha: 29/07/2025 Hora: 22:00. Se acude a llamado de enfermería manifestando paro cardiorrespiratorio. Se intentan maniobras de reanimación sin respuesta. Se constata óbito."
-✓ "PACIENTE OBITÓ - Fecha: 15/03/2025 Hora: 14:30. Evolucionó con shock séptico refractario a vasopresores."
-
-EJEMPLOS INCORRECTOS (NUNCA HACER):
-❌ "Evoluciona desfavorablemente y fallece."
-❌ "Paciente presenta óbito el día 15/03."
-❌ "Finalmente el paciente muere."
-
-═══════════════════════════════════════════════════════════════
-
-REGLAS GENERALES OBLIGATORIAS:
-1. OBLIGATORIO: Comenzar con "{paciente_info}, " seguido de antecedentes relevantes si los hay
-2. Texto médico técnico, estilo pase entre colegas (no narrativo coloquial)
-3. Estructura: 2-4 párrafos coherentes
-   - Párrafo 1: Antecedentes + motivo de ingreso
-   - Párrafo 2-3: Evolución durante internación, procedimientos, complicaciones
-   - Párrafo final: Desenlace (alta o óbito)
-4. NO mencionar fármacos específicos (van en Plan Terapéutico)
-5. NO repetir "{paciente_info}" después del primer párrafo
-6. NO inventar datos que no estén en las evoluciones
-7. Usar lenguaje médico preciso: evolucionó, presentó, se realizó, cursó con
+REGLAS DE ESTILO:
+1. Lenguaje médico técnico, estilo pase de guardia entre colegas
+2. Usar verbos: evolucionó, presentó, se realizó, cursó con, se constató
+3. NO mencionar fármacos específicos (van en Plan Terapéutico)
+4. NO repetir "{paciente_info}" después del primer párrafo
+5. NO inventar datos que no estén en las evoluciones registradas
+6. Extensión mínima: 150 palabras. El texto debe ser completo y detallado.
+7. NO usar separadores como "---" ni "===" en el texto
+8. La frase "DESENLACE: ÓBITO" debe aparecer EXACTAMENTE UNA VEZ, como última línea del texto
+9. El texto debe ser narrativo continuo en párrafos, sin encabezados ni separadores
 
 Responde SOLO con el texto de evolución en formato JSON:
 {{"evolucion_medica": "..."}}
@@ -891,10 +1244,11 @@ Responde SOLO con el texto de evolución en formato JSON:
             evolucion = evolucion.strip()
             print(f"[EPC-JSON] Evolución extraída ({len(evolucion)} chars): {evolucion[:150]}...")
             
-            # Limpiar si todavía es JSON string
-            if evolucion.startswith("{") and ("evolucion" in evolucion or "evolucion_medica" in evolucion):
+            # Limpiar si todavía es JSON string o tiene formato JSON
+            if evolucion.startswith("{") or ('"evolucion' in evolucion):
                 try:
                     import json
+                    # Intentar parsear JSON limpio
                     parsed_json = json.loads(evolucion)
                     if isinstance(parsed_json, dict):
                         evolucion = (
@@ -906,6 +1260,19 @@ Responde SOLO con el texto de evolución en formato JSON:
                         print(f"[EPC-JSON] JSON parseado, evolución: {evolucion[:100]}...")
                 except Exception as je:
                     print(f"[EPC-JSON] Error parseando JSON: {je}")
+                    # ⚠️ FALLBACK: Extraer texto entre comillas si hay JSON malformado
+                    # Buscar patrón "evolucion_medica": "..." o "evolucion": "..."
+                    match = re.search(r'"evolucion(?:_medica)?"\s*:\s*"((?:[^"\\]|\\.)*)"', evolucion, re.DOTALL)
+                    if match:
+                        evolucion = match.group(1)
+                        # Unescape JSON strings
+                        evolucion = evolucion.replace('\\"', '"').replace('\\n', '\n')
+                        print(f"[EPC-JSON] Extraído con regex: {evolucion[:100]}...")
+                    else:
+                        # Último recurso: quitar llaves y claves JSON
+                        evolucion = re.sub(r'^[{\s]*"evolucion(?:_medica)?"\s*:\s*"?', '', evolucion)
+                        evolucion = re.sub(r'"?\s*[}]*$', '', evolucion)
+                        print(f"[EPC-JSON] Limpiado manualmente: {evolucion[:100]}...")
             
             # Limpiar caracteres de control y normalizar espacios
             evolucion = evolucion.replace("\\n", "\n").replace('\\"', '"')
@@ -929,138 +1296,29 @@ Responde SOLO con el texto de evolución en formato JSON:
     # 5. Construir diagnóstico principal
     diagnostico = parsed["diagnosticos"][0] if parsed["diagnosticos"] else ""
     
-    # 6. Formatear interconsultas - Agrupar por especialidad con resumen
-    # Objetivo: mostrar max 3 interconsultas agrupadas por especialidad
-    from collections import defaultdict
-    
-    ic_by_specialty = defaultdict(list)
-    for ic in parsed["interconsultas"]:
-        especialidad = ic.get('especialidad', '')
-        if especialidad:
-            ic_by_specialty[especialidad].append(ic)
-    
-    interconsultas_formatted = []
-    
-    for especialidad, ics in ic_by_specialty.items():
-        if not ics:
-            continue
-        
-        # Ordenar por fecha
-        ics_sorted = sorted(ics, key=_parse_interconsulta_date)
-        
-        # Extraer rango de fechas
-        primera_fecha = ics_sorted[0].get('fecha', '')[:10] if ics_sorted else ''
-        ultima_fecha = ics_sorted[-1].get('fecha', '')[:10] if len(ics_sorted) > 1 else ''
-        
-        # Determinar resumen según cantidad
-        if len(ics_sorted) == 1:
-            # Una sola interconsulta - mostrar completa
-            obs = ics_sorted[0].get('observacion', '')
-            resumen = ""
-            if obs:
-                # Limpiar y resumir
-                if "Paciente cursa" in obs:
-                    resumen = obs.split("Paciente cursa")[-1][:60].strip()
-                elif "Paciente de" in obs and "." in obs:
-                    parts = obs.split(".")
-                    for part in parts[1:]:
-                        if len(part.strip()) > 10:
-                            resumen = part.strip()[:60]
-                            break
-                else:
-                    resumen = obs[:60]
-            
-            ic_str = f"{primera_fecha} - {especialidad}"
-            if resumen:
-                ic_str += f": {resumen}"
-            interconsultas_formatted.append(ic_str)
-        else:
-            # Múltiples interconsultas - mostrar cada una con su fecha y resumen corto
-            # Encabezado con la especialidad
-            if primera_fecha == ultima_fecha:
-                header = f"{primera_fecha}: {especialidad}"
-            else:
-                header = f"{primera_fecha} - {ultima_fecha}: {especialidad} ({len(ics_sorted)} seguimientos)"
-            interconsultas_formatted.append(header)
-            
-            # Listar cada seguimiento con fecha y mini-resumen
-            for ic in ics_sorted:
-                fecha = ic.get('fecha', '')[:10]  # Solo la fecha sin hora
-                obs = ic.get('observacion', '')
-                
-                # Extraer resumen útil y completo
-                mini_resumen = ""
-                if obs:
-                    # Normalizar espacios
-                    obs_clean = re.sub(r'\s+', ' ', obs)
-                    
-                    # Estrategia 1: Buscar palabras clave de seguimiento post-operatorio
-                    if re.search(r'\d+[°ª]?\s*d[ií]a\s*(?:de\s*)?POP', obs_clean, re.I):
-                        mini_resumen = "Seguimiento post-operatorio"
-                    
-                    # Estrategia 2: Buscar diagnóstico o impresión
-                    elif re.search(r'\b(?:idx|dx|diagnóstico|impresión):', obs_clean, re.I):
-                        match = re.search(r'\b(?:idx|dx|diagnóstico|impresión):\s*([^.]+)', obs_clean, re.I)
-                        if match:
-                            mini_resumen = match.group(1).strip()[:100]
-                    
-                    # Estrategia 3: Buscar lo que se solicita
-                    elif re.search(r'\b(?:solicito|solicita|se solicita)', obs_clean, re.I):
-                        match = re.search(r'\b(?:solicito|solicita|se solicita)\s+([^.]+)', obs_clean, re.I)
-                        if match:
-                            mini_resumen = "Solicita: " + match.group(1).strip()[:80]
-                    
-                    # Estrategia 4: Buscar estado actual del paciente
-                    elif re.search(r'\bactualmente\b', obs_clean, re.I):
-                        match = re.search(r'\bactualmente\s+([^.]+\.)', obs_clean, re.I)
-                        if match:
-                            frase = match.group(1).strip()
-                            # Tomar hasta el primer punto o 100 chars
-                            mini_resumen = frase[:100] if len(frase) <= 100 else frase[:100].rsplit(' ', 1)[0] + "..."
-                    
-                    # Estrategia 5: Tomar primera frase significativa (saltar antecedentes)
-                    if not mini_resumen:
-                        # Buscar frases que NO sean antecedentes
-                        frases = obs_clean.split('.')
-                        for i, frase in enumerate(frases):
-                            frase = frase.strip()
-                            # Saltar frases muy cortas o que hablan de antecedentes
-                            if len(frase) < 20:
-                                continue
-                            if i == 0 and re.search(r'\bantecedente', frase, re.I):
-                                continue
-                            # Tomar esta frase
-                            mini_resumen = frase[:100] if len(frase) <= 100 else frase[:100].rsplit(' ', 1)[0] + "..."
-                            break
-                    
-                    # Último recurso: tomar del inicio cortando en palabra
-                    if not mini_resumen and len(obs_clean) > 20:
-                        if len(obs_clean) <= 100:
-                            mini_resumen = obs_clean
-                        else:
-                            mini_resumen = obs_clean[:100].rsplit(' ', 1)[0] + "..."
-                
-                # Formatear línea
-                if mini_resumen:
-                    sub_ic = f"  - {fecha}: {mini_resumen}"
-                else:
-                    sub_ic = f"  - {fecha}"
-                interconsultas_formatted.append(sub_ic)
+    # 6. Formatear interconsultas - AGRUPADAS POR ESPECIALIDAD
+    # Usar función de agrupación que muestra solo primera fecha de cada especialidad
+    interconsultas_formatted = extract_interconsultas_chronologically(parsed["interconsultas"])
     
     # 7. Construir resultado final
     result = {
         "motivo_internacion": motivo,
         "diagnostico_principal_cie10": diagnostico,
         "evolucion": evolucion,
+        "estudios": sorted_studies,  # NUEVA SECCIÓN: TAC, RMN, RX, etc.
         "procedimientos": sorted_procs,
-        "interconsultas": interconsultas_formatted,
+        "interconsultas": interconsultas_formatted,  # Formato simplificado: Fecha - Especialidad
+        "interconsultas_detalle": interconsultas_formatted,  # Igual para compatibilidad
+        "laboratorios_detalle": lab_procedures,  # Lista individual de laboratorios para modal "Otros Datos de Interés"
         "medicacion": sorted_meds,
         "indicaciones_alta": [],
         "notas_alta": [],
         "_generated_by": "json_parser",
         "_meds_count": len(sorted_meds),
         "_procs_count": len(sorted_procs),
-        "_ic_count": len(interconsultas_formatted),
+        "_studies_count": len(sorted_studies),
+        "_labs_count": len(lab_procedures),
+        "_ic_count": len(sorted_interconsultas),
     }
     
     if parsed["plan_seguimiento"]:
@@ -1077,45 +1335,134 @@ Responde SOLO con el texto de evolución en formato JSON:
     
     # =========================================================================
     # 9. ⛔ REGLA OBLIGATORIA: Si taltDescripcion es OBITO, FORZAR formato
-    # Aunque las evoluciones no lo mencionen, el alta indica fallecimiento
+    # Según REGLAS_GENERACION_EPC.md: Subsección separada al final
     # =========================================================================
     if es_obito_por_alta:
         evolucion_actual = result.get("evolucion", "")
         
-        # Si NO tiene "PACIENTE OBITÓ", agregarlo
-        if "PACIENTE OBITÓ" not in evolucion_actual.upper():
-            # Buscar fecha de egreso
-            fecha_egreso = episodio.get("inteFechaEgreso", "")
-            if fecha_egreso:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(fecha_egreso.replace("Z", "+00:00"))
-                    fecha_str = dt.strftime("%d/%m/%Y")
-                    hora_str = dt.strftime("%H:%M")
-                except:
-                    fecha_str = "fecha no registrada"
-                    hora_str = "hora no registrada"
-            else:
+        # SIEMPRE reformatear si hay óbito (incluye limpieza de formato viejo)
+        # Buscar fecha de egreso
+        fecha_egreso = episodio.get("inteFechaEgreso", "")
+        if fecha_egreso:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(fecha_egreso.replace("Z", "+00:00"))
+                fecha_str = dt.strftime("%d/%m/%Y")
+                hora_str = dt.strftime("%H:%M")
+            except:
                 fecha_str = "fecha no registrada"
                 hora_str = "hora no registrada"
+        else:
+            fecha_str = "fecha no registrada"
+            hora_str = "hora no registrada"
+        
+        # ⚠️ LIMPIAR TODOS los formatos de ÓBITO generados por la IA
+        patrones_obito_limpiar = [
+            # Formato viejo: "PACIENTE OBITÓ - Fecha: XX Hora: YY. algo."
+            r"PACIENTE OBIT[OÓ]\s*[-–—]\s*Fecha:\s*[^\n.]*(?:\.|$)\s*",
+            r"^PACIENTE OBIT[OÓ][^\n]*\n*",
+            r"PACIENTE OBIT[OÓ][^.]*\.\s*",
+            # Bloques con --- separadores
+            r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?\s*Fecha[^-]*---\s*",
+            r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?[^-]*---\s*",
+            # Líneas sueltas de DESENLACE: ÓBITO (generadas por la IA)
+            r"\n*\**DESENLACE:\s*[ÓO]BITO\**[^\n]*\n*",
+            # Líneas tipo "Fecha: XX/XX/XXXX | Hora: XX:XX" si están al final solas
+            r"\n*Fecha:\s*\d{2}/\d{2}/\d{4}\s*\|\s*Hora:\s*\d{2}:\d{2}\s*$",
+        ]
+        for patron in patrones_obito_limpiar:
+            evolucion_actual = re.sub(patron, "", evolucion_actual, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # Eliminar frases contradictorias de alta
+        frases_eliminar = [
+            r"[^.]*(?:se retira|deambulando|por sus propios medios|dada de alta|dado de alta)[^.]*\.?\s*",
+            r"[^.]*(?:alta médica|alta hospitalaria)[^.]*\.?\s*",
+        ]
+        for patron in frases_eliminar:
+            evolucion_actual = re.sub(patron, "", evolucion_actual, flags=re.IGNORECASE)
+        
+        # Limpiar separadores --- y espacios duplicados
+        evolucion_actual = re.sub(r'---', '', evolucion_actual)
+        evolucion_actual = re.sub(r'\n{3,}', '\n\n', evolucion_actual).strip()
+        
+        # ⚠️ AGREGAR DESENLACE como LÍNEA SIMPLE al final (sin --- ni cuadros)
+        result["evolucion"] = evolucion_actual + f"\n\nDESENLACE: ÓBITO - Fecha: {fecha_str} | Hora: {hora_str}"
+        
+        # Limpiar indicaciones y recomendaciones
+        result["indicaciones_alta"] = []
+        result["recomendaciones"] = []
+        
+        log.info(f"[EPC-JSON] ⛔ FORZADO DESENLACE: ÓBITO al final desde taltDescripcion: {tipo_alta}")
+    
+    # =========================================================================
+    # 10. ⛔ VALIDACIÓN ANTI-ALUCINACIÓN: Cruzar ÓBITO en texto vs taltDescripcion
+    # Si la IA generó muerte pero el sistema dice ALTA → ELIMINAR la alucinación
+    # Si la IA generó muerte y el sistema dice OBITO → REFORMATEAR al nuevo estándar
+    # =========================================================================
+    evolucion_final = result.get("evolucion", "")
+    
+    # Detectar si hay mención de muerte/óbito en el texto
+    tiene_obito_texto = re.search(
+        r"PACIENTE OBIT[OÓ]|DESENLACE:\s*[ÓO]BITO|constata [óo]bito|se certifica (?:la )?defunci[óo]n|falleci[óo]|exitus",
+        evolucion_final, re.IGNORECASE
+    )
+    
+    if tiene_obito_texto and not es_obito_por_alta:
+        # ⛔ ALUCINACIÓN DETECTADA: La IA inventó un fallecimiento
+        log.warning(f"[EPC-JSON] ⛔⛔⛔ ALUCINACIÓN DETECTADA: IA generó ÓBITO pero taltDescripcion={tipo_alta}")
+        log.warning(f"[EPC-JSON] Eliminando falso óbito del texto")
+        
+        # Limpiar TODAS las menciones de muerte/óbito
+        patrones_limpiar = [
+            r"PACIENTE OBIT[OÓ]\s*[-–—]\s*Fecha:[^\n.]*(?:\.|$)\s*",
+            r"PACIENTE OBIT[OÓ][^.]*\.\s*",
+            r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?[^-]*---\s*",
+            r"[Ss]e constata [óo]bito[^.]*\.\s*",
+            r"[Ss]e certifica (?:la )?defunci[óo]n[^.]*\.\s*",
+        ]
+        for patron in patrones_limpiar:
+            evolucion_final = re.sub(patron, "", evolucion_final, flags=re.IGNORECASE)
+        
+        evolucion_final = re.sub(r'\n{3,}', '\n\n', evolucion_final).strip()
+        result["evolucion"] = evolucion_final
+        
+        log.info(f"[EPC-JSON] ✅ Alucinación de óbito eliminada del texto")
+    
+    elif tiene_obito_texto and es_obito_por_alta:
+        # ✅ ÓBITO LEGÍTIMO: reformatear si tiene formato viejo
+        tiene_formato_nuevo = "DESENLACE: ÓBITO" in evolucion_final.upper()
+        tiene_formato_viejo = re.search(r"PACIENTE OBIT[OÓ]", evolucion_final, re.IGNORECASE)
+        
+        if tiene_formato_viejo and not tiene_formato_nuevo:
+            # Extraer fecha y hora del formato viejo
+            match_fecha = re.search(r"Fecha:\s*(\d{1,2}/\d{1,2}/\d{4})", evolucion_final)
+            match_hora = re.search(r"Hora:\s*(\d{1,2}:\d{2}|hora no registrada)", evolucion_final, re.IGNORECASE)
             
-            # Eliminar frases contradictorias de alta
-            frases_eliminar = [
-                r"[^.]*(?:se retira|deambulando|por sus propios medios|dada de alta|dado de alta)[^.]*\.?\s*",
-                r"[^.]*(?:alta médica|alta hospitalaria)[^.]*\.?\s*",
+            fecha_str = match_fecha.group(1) if match_fecha else "fecha no registrada"
+            hora_str = match_hora.group(1) if match_hora else "hora no registrada"
+            
+            # Limpiar formato viejo
+            patrones_obito_viejo = [
+                r"PACIENTE OBIT[OÓ]\s*[-–—]\s*Fecha:\s*[^\n.]*(?:\.|$)\s*",
+                r"^PACIENTE OBIT[OÓ][^\n]*\n*",
+                r"PACIENTE OBIT[OÓ][^.]*\.\s*",
             ]
-            for patron in frases_eliminar:
-                evolucion_actual = re.sub(patron, "", evolucion_actual, flags=re.IGNORECASE)
+            for patron in patrones_obito_viejo:
+                evolucion_final = re.sub(patron, "", evolucion_final, flags=re.IGNORECASE)
             
-            # Agregar línea de óbito al final
-            linea_obito = f"\n\nPACIENTE OBITÓ - Fecha: {fecha_str} Hora: {hora_str}. Tipo de alta registrado: {tipo_alta}."
-            result["evolucion"] = evolucion_actual.strip() + linea_obito
+            evolucion_final = re.sub(r'\n{3,}', '\n\n', evolucion_final).strip()
             
-            # Limpiar indicaciones y recomendaciones
+            bloque_obito = f"""
+
+---
+**DESENLACE: ÓBITO**
+Fecha: {fecha_str} | Hora: {hora_str}
+---"""
+            result["evolucion"] = evolucion_final + bloque_obito
             result["indicaciones_alta"] = []
             result["recomendaciones"] = []
             
-            log.info(f"[EPC-JSON] ⛔ FORZADO PACIENTE OBITÓ desde taltDescripcion: {tipo_alta}")
+            log.info(f"[EPC-JSON] ⛔ REFORMATEADO ÓBITO legítimo: {fecha_str} {hora_str}")
     
     log.info(f"[EPC-JSON] EPC generada: meds={len(sorted_meds)}, procs={len(sorted_procs)}, ics={len(interconsultas_formatted)}")
     

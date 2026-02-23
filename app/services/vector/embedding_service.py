@@ -37,18 +37,19 @@ class EmbeddingService:
             return
         
         try:
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            # FERRO D2 v4: LlamaIndex embeddings (migrado desde LangChain)
+            from llama_index.embeddings.gemini import GeminiEmbedding
             from app.core.config import settings
             
-            self._embeddings = GoogleGenerativeAIEmbeddings(
-                model=self.MODEL,
-                google_api_key=settings.GEMINI_API_KEY,
+            self._embeddings = GeminiEmbedding(
+                model_name=self.MODEL,
+                api_key=settings.GEMINI_API_KEY,
             )
             self._initialized = True
-            log.info(f"[EmbeddingService] Initialized with {self.MODEL}")
+            log.info(f"[EmbeddingService] Initialized with {self.MODEL} (LlamaIndex)")
             
         except ImportError as e:
-            log.error(f"[EmbeddingService] langchain_google_genai not installed: {e}")
+            log.error(f"[EmbeddingService] llama-index-embeddings-gemini not installed: {e}")
             raise RuntimeError("Embedding dependencies not installed")
         except Exception as e:
             log.error(f"[EmbeddingService] Failed to initialize: {e}")
@@ -74,7 +75,8 @@ class EmbeddingService:
         if not text or not text.strip():
             return [0.0] * self.VECTOR_DIM
         
-        return self.model.embed_query(text)
+        # LlamaIndex API: get_text_embedding en lugar de embed_query
+        return self.model.get_text_embedding(text)
     
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """
@@ -94,7 +96,8 @@ class EmbeddingService:
         if not valid_texts:
             return [[0.0] * self.VECTOR_DIM for _ in texts]
         
-        return self.model.embed_documents(valid_texts)
+        # LlamaIndex API: get_text_embedding_batch en lugar de embed_documents
+        return self.model.get_text_embedding_batch(valid_texts)
 
 
 # Singleton global

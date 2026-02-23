@@ -18,12 +18,13 @@ pdfminer.six
 python-dotenv
 redis>=5.0.0
 
-# LangChain ecosystem
-langchain>=0.1.0
-langchain-google-genai>=1.0.0
-langchain-community>=0.0.20
+# LlamaIndex ecosystem (FERRO D2 v4 - migración desde LangChain)
+llama-index-core>=0.11.0
+llama-index-llms-gemini>=0.3.0
+llama-index-embeddings-gemini>=0.2.0
+llama-index-vector-stores-qdrant>=0.3.0
 
-# Vector DB for RAG (future)
+# Vector DB for RAG
 qdrant-client>=1.7.0
 
 # FERRO D2 v3.0.0 - OpenTelemetry Observability

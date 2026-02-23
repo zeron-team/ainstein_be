@@ -237,6 +237,11 @@ class Tenant(Base):
     
     # Notes/description for internal reference
     notes = Column(Text)
+    
+    # --- DISPLAY RULES ---
+    # Configurable rules for HCE display (JSON format)
+    # Example: {"excluded_sections": ["enfermeria", "epicrisis"]}
+    display_rules = Column(Text, default="{}")
 
     # Relationships
     api_keys = relationship("TenantAPIKey", back_populates="tenant")

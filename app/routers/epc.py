@@ -999,6 +999,7 @@ async def open_epc_for_patient(
     _id = _uuid_str()
     doc = {
         "_id": _id,
+        "epc_id": _id,  # Mismo valor que _id para consistencia en búsquedas
         "patient_id": patient_id,
         "admission_id": admission_id,
         "estado": "borrador",
@@ -1299,8 +1300,11 @@ async def generate_epc(
             # Usar parser JSON estructurado
             from app.services.hce_json_parser import generate_epc_from_json
             
-            log.info("[generate_epc] Detectado HCE JSON estructurado, usando parser JSON")
-            data = await generate_epc_from_json(hce, patient_id)
+            # Obtener tenant_id del usuario para aplicar reglas de visualización
+            tenant_id = str(user.tenant_id) if hasattr(user, 'tenant_id') and user.tenant_id else None
+            
+            log.info(f"[generate_epc] Detectado HCE JSON estructurado, usando parser JSON (tenant_id={tenant_id})")
+            data = await generate_epc_from_json(hce, patient_id, tenant_id=tenant_id, db=db)
         else:
             # Usar parser de texto plano
             from app.services.epc_section_generator import generate_epc_by_sections
@@ -2357,20 +2361,11 @@ async def get_learning_stats(
         sort=[("timestamp", -1)]
     )
     
-    # Agregar estadísticas acumuladas
-    pipeline = [
-        {"$group": {
-            "_id": None,
-            "total_feedbacks": {"$sum": "$feedbacks_analyzed"},
-            "total_problems": {"$sum": "$total_problems_found"},
-            "total_rules": {"$sum": "$total_rules_generated"},
-            "avg_feedbacks_per_analysis": {"$avg": "$feedbacks_analyzed"},
-            "avg_problems_per_analysis": {"$avg": "$total_problems_found"},
-        }}
-    ]
-    agg_cursor = mongo.learning_events.aggregate(pipeline)
-    agg_result = await agg_cursor.to_list(1)
-    totals = agg_result[0] if agg_result else {}
+    # NUEVO: Contar directamente de las colecciones de MongoDB
+    # Esto refleja el estado REAL actual del sistema
+    total_rules = await mongo.learning_rules.count_documents({})
+    total_problems = await mongo.learning_problems.count_documents({})
+    total_feedbacks = await mongo.epc_feedback.count_documents({})
     
     # Historial por semana (últimas 4 semanas)
     weekly_pipeline = [
@@ -2394,11 +2389,11 @@ async def get_learning_stats(
             "total_analyses": total_events,
             "analyses_this_week": events_this_week,
             "analyses_this_month": events_last_month,
-            "total_feedbacks_processed": totals.get("total_feedbacks", 0),
-            "total_problems_detected": totals.get("total_problems", 0),
-            "total_rules_generated": totals.get("total_rules", 0),
-            "avg_feedbacks_per_analysis": round(totals.get("avg_feedbacks_per_analysis", 0), 1),
-            "avg_problems_per_analysis": round(totals.get("avg_problems_per_analysis", 0), 1),
+            "total_feedbacks_processed": total_feedbacks,
+            "total_problems_detected": total_problems,
+            "total_rules_generated": total_rules,
+            "avg_feedbacks_per_analysis": round(total_feedbacks / max(total_events, 1), 1),
+            "avg_problems_per_analysis": round(total_problems / max(total_events, 1), 1),
         },
         "last_analysis": {
             "timestamp": last_event.get("timestamp").isoformat() if last_event and last_event.get("timestamp") else None,

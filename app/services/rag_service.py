@@ -43,8 +43,9 @@ class RAGService:
     def ai_service(self):
         """Lazy load del servicio de IA."""
         if self._ai_service is None:
-            from app.services.ai_langchain_service import LangChainAIService
-            self._ai_service = LangChainAIService()
+            # FERRO D2 v4: LlamaIndex (migrado desde LangChain)
+            from app.services.ai_llamaindex_service import LlamaIndexAIService
+            self._ai_service = LlamaIndexAIService()
         return self._ai_service
     
     @property

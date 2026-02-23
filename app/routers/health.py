@@ -178,18 +178,19 @@ async def check_qdrant() -> Dict[str, Any]:
         return {"status": "error", "message": error_msg[:100]}
 
 
-async def check_langchain() -> Dict[str, Any]:
-    """Verifica disponibilidad de LangChain."""
+async def check_llamaindex() -> Dict[str, Any]:
+    """Verifica disponibilidad de LlamaIndex (FERRO D2 v4)."""
     try:
         if not settings.RAG_ENABLED:
             return {"status": "disabled", "message": "RAG not enabled in config"}
         
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        from langchain_core.prompts import ChatPromptTemplate
+        # FERRO D2 v4: Verificar LlamaIndex en lugar de LangChain
+        from llama_index.llms.gemini import Gemini
+        from llama_index.embeddings.gemini import GeminiEmbedding
         
         return {
             "status": "ok",
-            "message": "LangChain available",
+            "message": "LlamaIndex available",
             "rag_enabled": settings.RAG_ENABLED,
         }
         
@@ -296,7 +297,7 @@ async def get_health_status(
     # External
     checks["gemini_api"] = await check_gemini()
     checks["ainstein_ws"] = await check_ainstein_ws()
-    checks["langchain"] = await check_langchain()
+    checks["llamaindex"] = await check_llamaindex()  # FERRO D2 v4: migrado desde LangChain
     
     # Calcular estado general
     statuses = [c["status"] for c in checks.values()]

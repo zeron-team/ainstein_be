@@ -472,6 +472,100 @@ async def get_available_scopes(
     }
 
 
+# =============================================================================
+# DISPLAY RULES - Configurable HCE sections per tenant
+# =============================================================================
+
+@router.get(
+    "/config/available-sections",
+    summary="Get available HCE sections to configure",
+)
+async def get_available_sections(
+    user: dict = Depends(require_admin),
+):
+    """Get list of HCE sections that can be shown/hidden per tenant."""
+    from app.services.tenant_rules_service import TenantRulesService
+    
+    return {
+        "sections": TenantRulesService.get_available_sections()
+    }
+
+
+@router.get(
+    "/{tenant_id}/rules",
+    summary="Get tenant display rules",
+)
+async def get_tenant_rules(
+    tenant_id: str,
+    user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Get display rules for a tenant.
+    
+    Returns which HCE sections are excluded from display.
+    """
+    from app.services.tenant_rules_service import TenantRulesService
+    
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    
+    service = TenantRulesService(db)
+    rules = service.get_tenant_rules(tenant_id)
+    
+    return {
+        "tenant_id": tenant_id,
+        "tenant_code": tenant.code,
+        "excluded_sections": rules.get("excluded_sections", []),
+        "custom_settings": rules.get("custom_settings", {}),
+    }
+
+
+class DisplayRulesUpdate(BaseModel):
+    """Request body for updating display rules."""
+    excluded_sections: List[str] = Field(..., description="List of section IDs to exclude")
+    custom_settings: Optional[dict] = None
+
+
+@router.put(
+    "/{tenant_id}/rules",
+    summary="Update tenant display rules",
+)
+async def update_tenant_rules(
+    tenant_id: str,
+    data: DisplayRulesUpdate,
+    user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Update display rules for a tenant.
+    
+    Configures which HCE sections to exclude from display.
+    """
+    from app.services.tenant_rules_service import TenantRulesService
+    
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    
+    service = TenantRulesService(db)
+    updated_rules = service.update_tenant_rules(
+        tenant_id=tenant_id,
+        excluded_sections=data.excluded_sections,
+        custom_settings=data.custom_settings,
+    )
+    
+    log.info(f"Display rules updated for tenant {tenant.code} by {user.get('username')}")
+    
+    return {
+        "status": "updated",
+        "tenant_id": tenant_id,
+        "tenant_code": tenant.code,
+        "excluded_sections": updated_rules.get("excluded_sections", []),
+    }
+
+
 @router.post(
     "/{tenant_id}/test-connection",
     summary="Test tenant HCE connection",
@@ -613,6 +707,15 @@ async def get_tenant_config(
         except json.JSONDecodeError:
             pass
     
+    # Parse display_rules for excluded_sections
+    excluded_sections = []
+    if tenant.display_rules:
+        try:
+            display_rules = json.loads(tenant.display_rules)
+            excluded_sections = display_rules.get("excluded_sections", [])
+        except json.JSONDecodeError:
+            pass
+    
     return {
         "id": tenant.id,
         "code": tenant.code,
@@ -632,6 +735,8 @@ async def get_tenant_config(
         "allowed_scopes": tenant.allowed_scopes,
         "webhook_url": tenant.webhook_url,
         "webhook_secret": tenant.webhook_secret,
+        # Display rules
+        "excluded_sections": excluded_sections,
         # General
         "api_rate_limit": tenant.api_rate_limit,
         "notes": tenant.notes,
@@ -706,6 +811,13 @@ async def update_tenant_config(
         tenant.api_rate_limit = config["api_rate_limit"]
     if "notes" in config:
         tenant.notes = config["notes"]
+    
+    # Update display rules (excluded_sections)
+    if "excluded_sections" in config:
+        display_rules = {
+            "excluded_sections": config["excluded_sections"]
+        }
+        tenant.display_rules = json.dumps(display_rules)
     
     db.commit()
     db.refresh(tenant)
