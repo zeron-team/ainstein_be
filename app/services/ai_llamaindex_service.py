@@ -123,16 +123,18 @@ class LlamaIndexAIService:
         hce_text: str,
         pages: int = 0,
         feedback_examples: Optional[List[Dict[str, Any]]] = None,
+        similar_context: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Genera contenido de EPC usando LlamaIndex.
         
-        FERRO D2 v4: Data-Centric approach with LlamaIndex.
+        FERRO D2 v4: Data-Centric approach with LlamaIndex + RAG.
         
         Args:
             hce_text: Texto de la HCE
             pages: Número de páginas (para contexto)
             feedback_examples: Ejemplos de EPCs exitosas para few-shot learning
+            similar_context: Chunks similares de otras HCEs (RAG retrieval)
         
         Returns:
             Diccionario con contenido generado y metadatos
@@ -170,11 +172,31 @@ class LlamaIndexAIService:
         if feedback_examples:
             examples_text = self._format_feedback_examples(feedback_examples)
         
+        # RAG context: chunks similares de otras HCEs
+        rag_context_text = ""
+        if similar_context:
+            rag_parts = []
+            for ctx in similar_context[:3]:  # Máximo 3 chunks
+                text = ctx.get("text", ctx.get("content", ""))
+                score = ctx.get("score", 0)
+                if text:
+                    rag_parts.append(f"[Similitud: {score:.2f}] {text[:800]}")
+            if rag_parts:
+                rag_context_text = (
+                    "\n\n--- CONTEXTO DE CASOS SIMILARES (RAG) ---\n"
+                    + "\n---\n".join(rag_parts)
+                    + "\n--- FIN CONTEXTO RAG ---\n"
+                )
+        
         # Construir prompt completo para LlamaIndex
         user_prompt = self._get_epc_user_prompt(examples_text).format(
             hce_text=hce_text,
             pages=pages,
         )
+        
+        # Inyectar contexto RAG entre examples y HCE
+        if rag_context_text:
+            user_prompt = rag_context_text + "\n" + user_prompt
         
         full_prompt = f"{system_prompt}\n\n---\n\nUSER:\n{user_prompt}"
         

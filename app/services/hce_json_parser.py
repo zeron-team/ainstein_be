@@ -160,7 +160,7 @@ def categorize_procedure(descripcion: str) -> str:
 def _parse_interconsulta_date(ic: Dict[str, Any]) -> datetime:
     """Parsea fecha de interconsulta para ordenamiento."""
     try:
-        return datetime.strptime(ic.get('fecha', ''), "%d/%m/%Y %H:%M")
+        return datetime.strptime(ic.get('fecha', ''), "%d/%m/%Y")
     except:
         return datetime.max
 
@@ -303,12 +303,36 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
         tipo_registro = entry.get("entrTipoRegistro", "")
         fecha = entry.get("entrFechaAtencion", "")
         
+        # =====================================================================
+        # 0. Extraer MOTIVO DE CONSULTA de entrMotivoConsulta (fuente principal)
+        # =====================================================================
+        motivo_consulta = (entry.get("entrMotivoConsulta") or "").strip()
+        if motivo_consulta and not result["motivo_internacion"]:
+            # Limpiar HTML tags
+            motivo_limpio = re.sub(r"<[^>]+>", "", motivo_consulta).strip()
+            if motivo_limpio and len(motivo_limpio) > 3:
+                result["motivo_internacion"] = motivo_limpio
+                log.info(f"[HCEJsonParser] Motivo extraído de entrMotivoConsulta: {motivo_limpio[:80]}")
+        
+        # Si es INGRESO o PARTE PROCEDIMIENTO, intentar extraer motivo de evolución
+        if not result["motivo_internacion"] and tipo_registro in (
+            "INGRESO DE PACIENTE", "PARTE PROCEDIMIENTO"
+        ):
+            evol_text = (entry.get("entrEvolucion") or "").strip()
+            evol_text = clean_html_text(evol_text) if evol_text else ""
+            if evol_text and len(evol_text) > 10:
+                # Usar primera oración o primeros 200 chars como motivo
+                first_sentence = evol_text.split(".")[0].strip()
+                if first_sentence and len(first_sentence) > 5:
+                    result["motivo_internacion"] = first_sentence
+                    log.info(f"[HCEJsonParser] Motivo extraído de {tipo_registro}: {first_sentence[:80]}")
+        
         # Parsear fecha
         fecha_str = ""
         if fecha:
             try:
                 dt = datetime.fromisoformat(fecha.replace("Z", "+00:00"))
-                fecha_str = dt.strftime("%d/%m/%Y %H:%M")
+                fecha_str = dt.strftime("%d/%m/%Y")
             except:
                 fecha_str = str(fecha)[:16]
         
@@ -676,7 +700,7 @@ def sort_and_group_procedures(
     def parse_date(p):
         fecha = p.get("fecha", "")
         try:
-            return datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+            return datetime.strptime(fecha, "%d/%m/%Y")
         except:
             return datetime.max
     
@@ -765,9 +789,8 @@ def sort_and_group_procedures(
     result = []
     seen = set()  # Evitar duplicados
     
-    # Agregar resumen de laboratorios al INICIO si hubo
-    if lab_count > 0:
-        result.append(f"Laboratorios realizados ({lab_count} estudios)")
+    # Laboratorios NO van en procedimientos - van en Determinaciones de Laboratorio
+    # (se extraen aparte con extract_lab_procedures)
     
     # Procesar procedimientos importantes (sin emojis)
     for p in important_procs:
@@ -840,7 +863,7 @@ def extract_lab_procedures(
     def parse_date(p):
         fecha = p.get("fecha", "")
         try:
-            return datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+            return datetime.strptime(fecha, "%d/%m/%Y")
         except:
             return datetime.max
     
@@ -919,7 +942,7 @@ def extract_studies_chronologically(
     def parse_date(p):
         fecha = p.get("fecha", "")
         try:
-            return datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+            return datetime.strptime(fecha, "%d/%m/%Y")
         except:
             return datetime.max
     
@@ -955,7 +978,7 @@ def extract_studies_chronologically(
         if fecha:
             # Parsear fecha para ordenar
             try:
-                dt = datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+                dt = datetime.strptime(fecha, "%d/%m/%Y")
             except:
                 dt = datetime.max
             result_items.append((dt, f"{fecha} - {nombre}"))
@@ -985,7 +1008,7 @@ def extract_interconsultas_chronologically(
     def parse_date(ic):
         fecha = ic.get("fecha", "")
         try:
-            return datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+            return datetime.strptime(fecha, "%d/%m/%Y")
         except:
             return datetime.max
     
@@ -1009,7 +1032,7 @@ def extract_interconsultas_chronologically(
     for especialidad, fecha in ic_por_especialidad.items():
         if fecha:
             try:
-                dt = datetime.strptime(fecha, "%d/%m/%Y %H:%M")
+                dt = datetime.strptime(fecha, "%d/%m/%Y")
             except:
                 dt = datetime.max
             result_items.append((dt, f"{fecha} - {especialidad}"))
@@ -1323,6 +1346,134 @@ Responde SOLO con el texto de evolución en formato JSON:
     
     if parsed["plan_seguimiento"]:
         result["notas_alta"].append(parsed["plan_seguimiento"])
+    
+    # =========================================================================
+    # 7b. DETERMINISTIC PROCEDURE EXTRACTION from evolution text
+    # In rich HCEs, structured data is mostly nursing/labs/admin entries.
+    # Real clinical procedures appear in the evolution narrative text.
+    # We extract them deterministically using keyword matching (no LLM).
+    # =========================================================================
+    tiene_evoluciones = bool(evolucion and len(evolucion) > 50)
+    
+    if not sorted_procs and tiene_evoluciones:
+        # Keyword patterns for clinical procedures (regex, case-insensitive)
+        PROCEDURE_PATTERNS = [
+            # Cardiovascular
+            r"(?:control|revisión|interrogación|implante|recambio)\s+(?:de(?:l)?\s+)?(?:CDI|cardiodesfibrilador|marcapasos|desfibrilador)",
+            r"cardioversión\s+(?:eléctrica|farmacológica)?",
+            r"cateterismo\s+(?:cardíaco|cardiaco)?",
+            r"angioplastia",
+            r"ablación",
+            # Respiratorio
+            r"intubación\s+(?:orotraqueal|endotraqueal)?",
+            r"traqueostomía",
+            r"ventilación\s+mecánica",
+            r"toracocentesis",
+            r"drenaje\s+(?:pleural|torácico)",
+            r"broncoscopía",
+            # Vías y catéteres
+            r"(?:colocación|retiro|cambio)\s+(?:de\s+)?(?:vía\s+(?:periférica|central)|catéter\s+(?:central|venoso|arterial)|sonda\s+(?:vesical|nasogástrica|foley))",
+            r"(?:retir[oó]|se\s+retir[oó])\s+(?:la\s+)?vía\s+(?:periférica|central)",
+            # Quirúrgico
+            r"cirugía\s+\w+",
+            r"intervención\s+quirúrgica",
+            r"(?:drenaje|punción|biopsia)\s+(?:de\s+)?\w+",
+            # Transfusiones
+            r"transfusión\s+(?:de\s+)?(?:glóbulos|sangre|plaquetas|plasma)",
+            # Diálisis
+            r"hemodiálisis",
+            r"diálisis\s+(?:peritoneal)?",
+            # Procedimientos generales
+            r"paracentesis",
+            r"lumbar\s+punción|punción\s+lumbar",
+            r"maniobras?\s+de\s+reanimación",
+            r"reanimación\s+cardiopulmonar",
+            r"suspensión\s+(?:de(?:l)?\s+)?(?:soporte\s+vital|tratamiento\s+con\s+\w+)",
+            r"inicio\s+(?:de\s+)?(?:tratamiento|terapia)\s+con\s+\w+",
+            r"ajuste\s+(?:de\s+)?(?:tratamiento|medicación|dosis)",
+        ]
+        
+        evol_lower = evolucion.lower()
+        found_procedures = []
+        seen = set()
+        
+        for pattern in PROCEDURE_PATTERNS:
+            matches = re.finditer(pattern, evol_lower, re.IGNORECASE)
+            for m in matches:
+                proc_text = m.group(0).strip()
+                # Capitalize first letter
+                proc_text = proc_text[0].upper() + proc_text[1:]
+                # Deduplicate
+                key = proc_text.lower()
+                if key not in seen:
+                    seen.add(key)
+                    found_procedures.append(proc_text)
+        
+        if found_procedures:
+            result["procedimientos"] = found_procedures
+            result["_ai_generated_procs"] = True  # Skip PostProcess date filter
+            log.info(f"[EPC-JSON] Deterministic extraction: {len(found_procedures)} procedimientos from evolution text")
+        else:
+            log.info("[EPC-JSON] No clinical procedures found in evolution text (deterministic extraction)")
+    
+    # =========================================================================
+    # 7c. AI FALLBACK: Solo para estudios e interconsultas vacías (raro)
+    # =========================================================================
+    secciones_vacias_no_procs = (
+        not sorted_studies and
+        not interconsultas_formatted
+    )
+    
+    if tiene_evoluciones and secciones_vacias_no_procs:
+        try:
+            from app.services.ai_gemini_service import GeminiAIService as _GeminiAI
+            ai_fallback = _GeminiAI()
+            
+            sections_to_extract = []
+            if not sorted_studies:
+                sections_to_extract.append('"estudios": ["Nombre del estudio"]')
+            if not interconsultas_formatted:
+                sections_to_extract.append('"interconsultas": ["Especialidad"]')
+            
+            if sections_to_extract:
+                sections_json = ",\n  ".join(sections_to_extract)
+                
+                fallback_prompt = f"""Eres un médico especialista. Analiza la siguiente evolución y extrae SOLO lo EXPLÍCITAMENTE mencionado.
+
+EVOLUCIÓN:
+{evolucion}
+
+INSTRUCCIONES:
+1. Extrae SOLO información EXPLÍCITAMENTE mencionada
+2. NO inventes datos
+3. Si una sección no tiene info, déjala como []
+4. NO incluir fechas, solo descripciones
+
+Responde SOLO con JSON válido:
+{{
+  {sections_json}
+}}"""
+                
+                log.info("[EPC-JSON] AI fallback for empty estudios/interconsultas")
+                fb_result = await ai_fallback.generate_epc(fallback_prompt)
+                
+                fb_data = {}
+                if isinstance(fb_result, dict):
+                    json_content = fb_result.get("json", fb_result)
+                    if isinstance(json_content, dict):
+                        fb_data = json_content
+                
+                if fb_data:
+                    if not sorted_studies and fb_data.get("estudios"):
+                        result["estudios"] = [s for s in fb_data["estudios"] if isinstance(s, str)]
+                        log.info(f"[EPC-JSON] AI fallback: {len(result['estudios'])} estudios")
+                    if not interconsultas_formatted and fb_data.get("interconsultas"):
+                        result["interconsultas"] = [ic for ic in fb_data["interconsultas"] if isinstance(ic, str)]
+                        result["interconsultas_detalle"] = result["interconsultas"]
+                        log.info(f"[EPC-JSON] AI fallback: {len(result['interconsultas'])} interconsultas")
+        
+        except Exception as e:
+            log.warning(f"[EPC-JSON] AI fallback failed (non-critical): {e}")
     
     # 8. ⚠️ POST-PROCESAMIENTO CRÍTICO: Aplicar regla de óbito como respaldo
     # Si el LLM no aplicó la regla, la aplicamos aquí

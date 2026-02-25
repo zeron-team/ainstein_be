@@ -12,13 +12,9 @@ from pymongo.errors import OperationFailure
 
 from app.core.config import settings
 
-# Colecciones candidatas donde pueden aterrizar las HCE
+# Colección principal de HCEs
 HCE_COLLECTIONS_CANDIDATES: List[str] = [
-    "hce_docs",          # prioridad 1 (la que usamos en /hce/upload)
-    "hce",
-    "hce_parsed",
-    "hce_docs_parsed",
-    "epc_hce",
+    "hce_docs",          # única colección activa con documentos HCE
 ]
 
 def _database_name_from_url(url: str, default: str = "epc") -> str:

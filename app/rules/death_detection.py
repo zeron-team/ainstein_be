@@ -42,17 +42,19 @@ class DeathDetectionRule:
     
     # Palabras clave que indican fallecimiento (orden de prioridad)
     DEATH_KEYWORDS: List[str] = [
-        # Términos directos
+        # Términos directos (alta confianza)
         "fallece", "falleció", "fallecio", "falleciendo",
         "óbito", "obito", "obitó",
         "murió", "murio", "deceso",
         "defunción", "defuncion", "fallecimiento",
-        "muerte", "muerto", "finado", "fallecido",
+        "finado", "fallecido",
         # Términos médicos
-        "paro cardiorrespiratorio", "pcr",
+        "paro cardiorrespiratorio irreversible", "pcr irreversible",
         "exitus", "éxitus",
-        # Acciones que indican muerte
-        "se constata", "constata",  # "se constata óbito"
+        # Acciones ESPECÍFICAS que indican muerte (no genéricas)
+        "se constata óbito", "se constata obito",
+        "se constata defunción", "se constata defuncion",
+        "constata el deceso", "constata el fallecimiento",
         "maniobras de reanimación",
         "sin respuesta a maniobras",
         "retiro de soporte vital",
@@ -60,7 +62,7 @@ class DeathDetectionRule:
         "cuidados de fin de vida",
         "se certifica defunción",
         "se suspende soporte vital",
-        "paciente finado",
+        "paciente finado", "paciente fallecido",
     ]
     
     # Patrones regex para extraer fecha y hora

@@ -11,12 +11,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def migrate():
     print("Connecting to databases...")
     # MySQL Connection (Source)
-    # Using root/root for the temp container
+    # VPS local MySQL
     mysql_conn = pymysql.connect(
         host="127.0.0.1",
-        port=3307,
-        user="root",
-        password="root",
+        port=3306,
+        user="epc_user",
+        password="V4n4h3!m",
         database="epc_db",
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor
@@ -24,7 +24,7 @@ def migrate():
 
     # Postgres Connection (Target)
     pg_conn = psycopg2.connect(
-        "postgresql://epc_user:epc_strong_pass_2025@localhost:5432/epc_db"
+        "postgresql://ainstein:ainstein_secure_2026@localhost:5432/ainstein"
     )
     pg_conn.autocommit = False
 

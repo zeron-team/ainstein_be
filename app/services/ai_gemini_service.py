@@ -146,8 +146,11 @@ class GeminiAIService:
             if extra_system_instructions:
                 payload["system_instruction"] = {"parts": [{"text": extra_system_instructions}]}
 
+            # temperature=0 para resultados determinísticos (siempre el mismo output)
+            gen_config: Dict[str, Any] = {"temperature": 0, "topP": 1}
             if want_json:
-                payload["generationConfig"] = {"responseMimeType": "application/json"}
+                gen_config["responseMimeType"] = "application/json"
+            payload["generationConfig"] = gen_config
 
             try:
                 async with httpx.AsyncClient(timeout=90) as client:

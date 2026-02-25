@@ -107,7 +107,7 @@ class RAGService:
             except Exception as e:
                 log.warning("[RAGService] Failed to get feedback examples: %s", e)
         
-        # Paso 2: Recuperar chunks similares de otras HCEs (si está activo)
+        # Paso 2: Recuperar chunks similares de otras HCEs (contexto)
         if self.vector_service:
             try:
                 similar_context = await self.vector_service.search_similar_hce_chunks(
@@ -118,11 +118,12 @@ class RAGService:
             except Exception as e:
                 log.warning("[RAGService] Failed to search similar chunks: %s", e)
         
-        # Paso 3: Generar EPC con LangChain
+        # Paso 3: Generar EPC con contexto RAG inyectado
         result = await self.ai_service.generate_epc(
             hce_text=hce_text,
             pages=pages,
             feedback_examples=feedback_examples,
+            similar_context=similar_context,  # ✅ FIX: Ahora se inyecta el contexto similar
         )
         
         # Agregar metadatos de RAG
@@ -130,6 +131,13 @@ class RAGService:
         result["_feedback_examples_count"] = len(feedback_examples)
         result["_similar_context_count"] = len(similar_context)
         result["_cache_hit"] = False
+        
+        # Paso 4: Auto-indexar chunks de esta HCE para futuras consultas RAG
+        if self.vector_service and patient_id:
+            try:
+                await self._index_hce_chunks(hce_text, patient_id)
+            except Exception as e:
+                log.warning("[RAGService] Failed to index HCE chunks: %s", e)
         
         # FERRO D2: Cache store (async, non-blocking)
         if cache_key:
@@ -165,6 +173,44 @@ class RAGService:
             })
         
         return examples
+    
+    async def _index_hce_chunks(self, hce_text: str, patient_id: str):
+        """
+        Auto-indexa chunks de la HCE actual para futuras consultas RAG.
+        Usa el chunker sentence-aware de rust_engine para crear chunks de calidad.
+        """
+        from app.services.rust_engine import chunk_text
+        
+        # Crear chunks con overlap para continuidad de contexto
+        chunks = chunk_text(hce_text, chunk_size=1000, overlap=200)
+        
+        if not chunks:
+            return
+        
+        indexed = 0
+        for i, chunk in enumerate(chunks):
+            if len(chunk.strip()) < 50:  # Skip trivially small chunks
+                continue
+            
+            chunk_id = hashlib.sha256(
+                f"{patient_id}_{i}_{chunk[:100]}".encode()
+            ).hexdigest()[:16]
+            
+            try:
+                await self.vector_service.add_hce_chunk(
+                    chunk_id=chunk_id,
+                    text=chunk,
+                    metadata={
+                        "patient_id": patient_id,
+                        "chunk_index": i,
+                        "total_chunks": len(chunks),
+                    },
+                )
+                indexed += 1
+            except Exception as e:
+                log.warning("[RAGService] Failed to index chunk %d: %s", i, e)
+        
+        log.info("[RAGService] Indexed %d/%d HCE chunks for patient %s", indexed, len(chunks), patient_id)
     
     async def save_successful_epc(
         self,

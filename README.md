@@ -363,11 +363,13 @@ ainstein_be/
 │   │   ├── 📄 health.py             # /admin/health (healthcheck)
 │   │   ├── 📄 tenants.py            # 🆕 /admin/tenants CRUD
 │   │   ├── 📄 external.py           # 🆕 /api/v1/external (API para tenants)
+│   │   ├── 📄 snomed.py             # 🆕 /snomed (SNOMED CT integration)
 │   │   ├── 📄 stats.py              # /stats (KPIs)
 │   │   ├── 📄 config.py             # /config (branding)
 │   │   ├── 📄 ingest.py             # /ingest (carga datos)
-│   │   ├── 📄 files.py              # /files (PDF download)
-│   │   └── 📄 debug.py              # /debug (solo desarrollo)
+│   │   ├── 📁 _deprecated/          # Routers deprecados
+│   │   │   ├── 📄 debug.py
+│   │   │   └── 📄 files.py
 │   │
 │   ├── 📁 services/                 # ═══ LÓGICA DE NEGOCIO ═══
 │   │   │
@@ -431,6 +433,9 @@ ainstein_be/
 │   ├── 📄 restore_from_dump.py      # Restaurar desde backup
 │   └── 📄 migrate_mysql_postgres.py # Migración legacy
 │
+├── 📁 app/scripts/                  # ═══ SCRIPTS INTERNOS ═══
+│   └── 📄 load_snomed.py            # 🆕 Cargador SNOMED CT
+│
 ├── 📁 rust_lib/                     # ═══ MOTOR RUST ═══
 │   ├── 📄 Cargo.toml                # Dependencias Rust
 │   ├── 📄 pyproject.toml            # Config maturin
@@ -443,9 +448,7 @@ ainstein_be/
 │   ├── 📄 CHECKLIST_SISTEMA.md      # Checklist de verificación
 │   └── 📄 REGLAS_GENERACION_EPC.md  # Reglas de negocio EPC
 │
-├── 📁 hce/                          # Archivos HCE ejemplo
-│
-└── 📁 dumps_20260128/               # Backups de datos
+└── 📁 hce/                          # Archivos HCE ejemplo
 ```
 
 ---
@@ -710,6 +713,15 @@ flowchart LR
 | GET | `/admin/tenants/{id}/test-connection` | Probar conexión HCE |
 | GET | `/epc/admin/feedback-dashboard` | Dashboard feedback IA |
 | GET | `/epc/admin/llm-costs` | Costos LLM |
+| GET | `/epc/admin/epc-control` | 🆕 Dashboard control EPCs |
+
+### SNOMED CT
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/snomed/interconsultas` | Listar interconsultas SNOMED CT |
+| GET | `/snomed/estudios` | Listar estudios SNOMED CT |
+| GET | `/snomed/procedimientos` | Listar procedimientos SNOMED CT |
 
 ---
 
@@ -901,4 +913,4 @@ Propiedad de **Zeron Team** - Todos los derechos reservados.
 
 ---
 
-*Última actualización: 2026-02-03 | FERRO D2 v3.0.0*
+*Última actualización: 2026-02-25 | FERRO D2 v3.0.0*

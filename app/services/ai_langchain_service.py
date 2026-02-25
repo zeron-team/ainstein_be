@@ -87,20 +87,20 @@ def _post_process_epc_result(result: Dict[str, Any]) -> Dict[str, Any]:
         if hay_fallecimiento:
             log.info(f"[PostProcess] Fallecimiento detectado via rules module: {death_info.detection_method}")
     else:
-        # Fallback: palabras clave hardcodeadas
+        # Fallback: palabras clave hardcodeadas (específicas, sin falsos positivos)
         PALABRAS_FALLECIMIENTO = [
             "fallece", "falleció", "fallecio", "falleciendo",
             "óbito", "obito", "obitó",
             "murió", "murio", "deceso", "defunción", "defuncion", "fallecimiento",
-            "paro cardiorrespiratorio", "muerte", "pcr",
+            "paro cardiorrespiratorio irreversible", "pcr irreversible",
             "exitus", "éxitus",
-            "fin de vida",
             "se suspende soporte vital", "suspensión de soporte",
             "se certifica defunción", "certifica defunción",
-            "paro cardiorrespiratorio irreversible", "pcr irreversible",
             "retiro de soporte vital", "limitación del esfuerzo terapéutico",
             "paciente finado", "finado",
-            "constata", "se constata",
+            "se constata óbito", "se constata obito",
+            "se constata defunción", "se constata defuncion",
+            "constata el deceso", "constata el fallecimiento",
             "maniobras de reanimación",
             "sin respuesta a maniobras",
             "paciente fallecido"
@@ -322,9 +322,14 @@ def _post_process_epc_result(result: Dict[str, Any]) -> Dict[str, Any]:
     
     # =========================================================================
     # REGLA 5: Filtrar procedimientos sin fecha y normalizar formato
+    # (Solo para procedimientos extraídos del parser, NO para AI-generated)
     # =========================================================================
-    procedimientos = result.get("procedimientos", [])
-    if procedimientos and isinstance(procedimientos, list):
+    if result.get("_ai_generated_procs"):
+        log.info(f"[PostProcess] Procedimientos AI-generated: {len(result.get('procedimientos', []))} items (sin filtrar fechas)")
+    else:
+        procedimientos = result.get("procedimientos", [])
+        if not (procedimientos and isinstance(procedimientos, list)):
+            procedimientos = []
         procedimientos_validos = []
         hemodialisis_fechas = []
         

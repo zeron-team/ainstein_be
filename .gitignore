@@ -1,5 +1,5 @@
+# Python
 .venv
-.env
 __pycache__/
 *.pyc
 *.pyo
@@ -10,3 +10,31 @@ __pycache__/
 .coverage
 htmlcov/
 .mypy_cache/
+
+# Environment & Secrets
+.env
+
+# Rust build artifacts
+rust_lib/target/
+ferro_engine/target/
+
+# Logs
+*.log
+backend.log
+
+# Database dumps
+dumps_*/
+
+# SNOMED CT data files (too large for git)
+docs/SnomedCT_*/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary/utility scripts
+cleanup_*.py
+check_feedback.py
+debug_env.py
+import_*.py
+test_feedback_submission.py

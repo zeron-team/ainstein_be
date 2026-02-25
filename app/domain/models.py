@@ -125,15 +125,6 @@ class EPC(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, onupdate=func.now())
 
-    # Contenido editable (opcional en SQL, hoy lo estás manejando en Mongo)
-    motivo_internacion = Column(Text)
-    evolucion = Column(Text)
-    procedimientos = Column(Text)        # líneas separadas por \n
-    interconsultas = Column(Text)
-    medicacion = Column(Text)
-    indicaciones_alta = Column(Text)
-    recomendaciones = Column(Text)
-
     # Auditoría de edición / regeneración
     last_edited_by = Column(String(36), ForeignKey("users.id"))
     last_edited_at = Column(DateTime)

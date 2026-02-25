@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 import logging
 import hashlib
@@ -583,117 +584,29 @@ def _epc_pdf_payload_from_context(
     if evolucion:
         sections["Evolución"] = str(evolucion)
 
+    # Estudios (nueva sección)
+    estudios = gdata.get("estudios") or generated.get("estudios") or []
+    if estudios:
+        sections["Estudios"] = _list_to_lines(estudios)
+
     procedimientos = gdata.get("procedimientos") or generated.get("procedimientos") or []
     interconsultas = gdata.get("interconsultas") or generated.get("interconsultas") or []
     
-    # Medicación - NUEVA ESTRUCTURA SEPARADA
-    medicacion_internacion = gdata.get("medicacion_internacion") or generated.get("medicacion_internacion") or []
-    medicacion_previa = gdata.get("medicacion_previa") or generated.get("medicacion_previa") or []
-    medicacion_legacy = gdata.get("medicacion") or generated.get("medicacion") or []
+    # Medicación: usar SOLO lo que el usuario ve/edita en "Tratamiento Terapéutico"
+    # NO incluir datos expandidos de "Otros Datos de Interés" (Farmacología/Laboratorio)
+    medicacion = gdata.get("medicacion") or generated.get("medicacion") or []
     
     indicaciones_alta = gdata.get("indicaciones_alta") or generated.get("indicaciones_alta") or []
     recomendaciones = gdata.get("recomendaciones") or generated.get("recomendaciones") or []
-
-    # EXPANSIÓN DE LABS PARA PDF
-    # Leer configuración de exportación del usuario
-    export_config = epc_doc.get("export_config", {})
-    selected_labs = export_config.get("selected_labs", [])
-    
-    # Si procedimientos tiene el tag agrupado de labs, decidir qué hacer según selección
-    if procedimientos and hce:
-        procedimientos_expandidos = []
-        labs_expandidos = False
-        
-        for proc_item in procedimientos:
-            proc_str = str(proc_item) if not isinstance(proc_item, str) else proc_item
-            
-            # Detectar tag agrupado de labs
-            if "Laboratorios realizados" in proc_str and "estudios)" in proc_str:
-                # CASO 1: No hay selección → mantener tag agrupado
-                if not selected_labs:
-                    procedimientos_expandidos.append(proc_item)
-                    continue
-                
-                # CASO 2: Hay selección → expandir solo los seleccionados
-                parsed_hce = hce.get("ai_generated", {}) or {}
-                parsed_data = parsed_hce.get("parsed_hce", {})
-                procedimientos_hce = parsed_data.get("procedimientos", [])
-                
-                if procedimientos_hce:
-                    # Filtrar solo laboratorios que estén en la selección del usuario
-                    labs_individuales = [
-                        p for p in procedimientos_hce 
-                        if isinstance(p, dict) 
-                        and p.get("categoria") == "laboratorio"
-                        and p.get("descripcion") in selected_labs
-                    ]
-                    
-                    if labs_individuales:
-                        # Agregar header
-                        procedimientos_expandidos.append("Laboratorios seleccionados:")
-                        # Agregar cada lab con fecha y descripción
-                        for lab in labs_individuales:
-                            fecha = lab.get("fecha", "")[:16] if lab.get("fecha") else ""  # YYYY-MM-DD HH:MM
-                            desc = lab.get("descripcion", "Lab")
-                            if fecha:
-                                procedimientos_expandidos.append(f"  {fecha}: {desc}")
-                            else:
-                                procedimientos_expandidos.append(f"  {desc}")
-                        labs_expandidos = True
-                    else:
-                        # Selección sin labs válidos → mantener tag agrupado
-                        procedimientos_expandidos.append(proc_item)
-            
-            # Si no es el tag agrupado, mantener como está
-            if not ("Laboratorios realizados" in proc_str and "estudios)" in proc_str):
-                procedimientos_expandidos.append(proc_item)
-        
-        # Si se expandió, usar la lista expandida
-        if labs_expandidos:
-            procedimientos = procedimientos_expandidos
 
     if procedimientos:
         sections["Procedimientos"] = _list_to_lines(procedimientos)
     if interconsultas:
         sections["Interconsultas"] = _list_to_lines(interconsultas)
     
-    # MEDICACIÓN CON SUBSECCIONES
-    # Si hay medicación separada (nueva estructura), mostrar con subsecciones
-    # Si no, usar legacy para compatibilidad con EPCs antiguas
-    if medicacion_internacion or medicacion_previa:
-        med_lines = []
-        
-        if medicacion_internacion:
-            med_lines.append("Medicación durante internación:")
-            for med in medicacion_internacion:
-                # Formatear: "FARMACO dosis via frecuencia"
-                parts = [
-                    med.get("farmaco", ""),
-                    med.get("dosis", ""),
-                    med.get("via", ""),
-                    med.get("frecuencia", "")
-                ]
-                med_str = " ".join([p for p in parts if p]).strip()
-                med_lines.append(f"• {med_str}")
-        
-        if medicacion_previa:
-            if med_lines:  # Si ya hay medicación de internación, agregar espacio
-                med_lines.append("")
-            med_lines.append("Medicación habitual previa:")
-            for med in medicacion_previa:
-                parts = [
-                    med.get("farmaco", ""),
-                    med.get("dosis", ""),
-                    med.get("via", "")
-                ]
-                med_str = " ".join([p for p in parts if p]).strip()
-                med_lines.append(f"• {med_str}")
-        
-        if med_lines:
-            sections["Plan Terapéutico"] = "\n".join(med_lines)
-    elif medicacion_legacy:
-        # Compatibilidad con EPCs antiguas
-        sections["Plan Terapéutico"] = _list_to_lines(medicacion_legacy)
+    # Plan Terapéutico: solo lo editado por el usuario
+    if medicacion:
+        sections["Plan Terapéutico"] = _list_to_lines(medicacion)
     
     if indicaciones_alta:
         sections["Indicaciones de alta"] = _list_to_lines(indicaciones_alta)
@@ -1881,6 +1794,361 @@ async def update_epc(
 
 
 # -----------------------------------------------------------------------------
+# Correcciones de items entre secciones (Estudios/Procedimientos/Interconsultas)
+# Para aprendizaje continuo: el sistema aprende de las correcciones del usuario
+# -----------------------------------------------------------------------------
+class SectionCorrectionItem(BaseModel):
+    item: str
+    from_section: str
+    to_section: Optional[str] = None
+    action: str  # "move", "remove", "confirm"
+
+class SectionCorrectionsRequest(BaseModel):
+    corrections: List[SectionCorrectionItem]
+
+@router.post("/{epc_id}/section-corrections")
+async def submit_section_corrections(
+    epc_id: str,
+    body: SectionCorrectionsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Guarda correcciones de items entre secciones para aprendizaje continuo.
+    Cuando un usuario mueve un item de Estudios a Procedimientos, el sistema
+    aprende que ese tipo de item debería clasificarse como procedimiento.
+    """
+
+    for correction in body.corrections:
+        doc = {
+            "epc_id": epc_id,
+            "item": correction.item,
+            "from_section": correction.from_section,
+            "to_section": correction.to_section,
+            "action": correction.action,
+            "user_id": current_user.get("sub") or current_user.get("id"),
+            "created_at": datetime.utcnow(),
+            "approval_status": "pending",
+            "approved_by": None,
+            "approved_at": None,
+        }
+        await mongo.epc_section_corrections.insert_one(doc)
+    
+    log.info(
+        "[section-corrections] epc_id=%s corrections=%d by=%s",
+        epc_id, len(body.corrections),
+        current_user.get("sub") or current_user.get("id"),
+    )
+    
+    return {"ok": True, "saved": len(body.corrections)}
+
+
+@router.get("/{epc_id}/section-corrections")
+async def get_section_corrections(
+    epc_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Recupera todas las correcciones de items entre secciones para una EPC.
+    Incluye resumen con conteo por tipo de acción y detalle de cada corrección.
+    """
+
+    cursor = mongo.epc_section_corrections.find(
+        {"epc_id": epc_id}
+    ).sort("created_at", -1)
+    
+    corrections = []
+    summary = {"move": 0, "remove": 0, "confirm": 0, "total": 0}
+    
+    async for doc in cursor:
+        action = doc.get("action", "unknown")
+        summary[action] = summary.get(action, 0) + 1
+        summary["total"] += 1
+        corrections.append({
+            "item": doc.get("item"),
+            "from_section": doc.get("from_section"),
+            "to_section": doc.get("to_section"),
+            "action": action,
+            "user_id": doc.get("user_id"),
+            "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+        })
+    
+    return {
+        "epc_id": epc_id,
+        "summary": summary,
+        "corrections": corrections,
+    }
+
+@router.get("/feedback/corrections")
+async def get_all_section_corrections(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Recupera TODAS las correcciones de items entre secciones, agrupadas por EPC.
+    Para el dashboard de feedback. Enriquecido con datos del paciente.
+    """
+
+    cursor = mongo.epc_section_corrections.find().sort("created_at", -1).limit(500)
+    
+    corrections = []
+    summary = {"move": 0, "remove": 0, "confirm": 0, "total": 0}
+    by_epc: dict = {}
+    epc_ids_set: set = set()
+    
+    async for doc in cursor:
+        action = doc.get("action", "unknown")
+        summary[action] = summary.get(action, 0) + 1
+        summary["total"] += 1
+        
+        epc_id = doc.get("epc_id", "unknown")
+        epc_ids_set.add(epc_id)
+        if epc_id not in by_epc:
+            by_epc[epc_id] = {"epc_id": epc_id, "count": 0, "move": 0, "remove": 0, "confirm": 0}
+        by_epc[epc_id]["count"] += 1
+        by_epc[epc_id][action] = by_epc[epc_id].get(action, 0) + 1
+        
+        corrections.append({
+            "_id": str(doc.get("_id")),
+            "epc_id": epc_id,
+            "item": doc.get("item"),
+            "from_section": doc.get("from_section"),
+            "to_section": doc.get("to_section"),
+            "action": action,
+            "user_id": doc.get("user_id"),
+            "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+            "approval_status": doc.get("approval_status", "pending"),
+            "approved_by": doc.get("approved_by"),
+            "approved_at": doc.get("approved_at").isoformat() if doc.get("approved_at") else None,
+        })
+    
+    # --- Enriquecer con datos del paciente ---
+    # 1. Buscar patient_id desde epc_docs
+    epc_ids_list = list(epc_ids_set)
+    epc_patient_map: dict = {}  # epc_id -> patient_id
+    if epc_ids_list:
+        epc_docs_cursor = mongo.epc_docs.find(
+            {"_id": {"$in": epc_ids_list}},
+            {"_id": 1, "patient_id": 1}
+        )
+        async for epc_doc in epc_docs_cursor:
+            pid = epc_doc.get("patient_id")
+            if pid:
+                epc_patient_map[epc_doc["_id"]] = str(pid)
+    
+    # 2. Buscar nombres de pacientes desde PostgreSQL
+    patient_name_map: dict = {}
+    all_patient_ids = set(epc_patient_map.values())
+    if all_patient_ids:
+        try:
+            patients = db.query(Patient.id, Patient.apellido, Patient.nombre, Patient.dni).all()
+            for p in patients:
+                display = f"{p.apellido}, {p.nombre}".strip(", ")
+                if p.dni:
+                    display = f"{p.dni} - {display}"
+                patient_name_map[str(p.id)] = display
+        except Exception:
+            pass
+    
+    # 3. Agregar patient_id y patient_name a cada corrección
+    for c in corrections:
+        pid = epc_patient_map.get(c["epc_id"])
+        c["patient_id"] = pid
+        c["patient_name"] = patient_name_map.get(pid) if pid else None
+    
+    return {
+        "summary": summary,
+        "by_epc": list(by_epc.values()),
+        "corrections": corrections,
+    }
+
+
+# --- Aprobar / Rechazar corrección ---
+class CorrectionApprovalRequest(BaseModel):
+    status: str  # "approved" | "rejected"
+
+@router.patch("/section-corrections/{correction_id}/approve")
+async def approve_section_correction(
+    correction_id: str,
+    body: CorrectionApprovalRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Aprueba o rechaza una corrección de sección.
+    Si se aprueba una corrección tipo 'move', se crea/actualiza una regla
+    en el diccionario de mapeo de secciones para aprendizaje futuro.
+    """
+    if body.status not in ("approved", "rejected", "consultar", "pending"):
+        raise HTTPException(status_code=400, detail="Estado inválido. Usar: approved, rejected")
+    
+    # Buscar la corrección
+    try:
+        oid = ObjectId(correction_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID de corrección inválido")
+    
+    correction_doc = await mongo.epc_section_corrections.find_one({"_id": oid})
+    if not correction_doc:
+        raise HTTPException(status_code=404, detail="Corrección no encontrada")
+    
+    approver_name = _actor_name(current_user) if hasattr(current_user, "full_name") else (
+        current_user.get("full_name") or current_user.get("username") or current_user.get("sub") or "sistema"
+    ) if isinstance(current_user, dict) else _actor_name(current_user)
+    
+    # Actualizar estado
+    await mongo.epc_section_corrections.update_one(
+        {"_id": oid},
+        {"$set": {
+            "approval_status": body.status,
+            "approved_by": approver_name,
+            "approved_at": datetime.utcnow(),
+        }}
+    )
+    
+    # Si se aprueba, actualizar el diccionario de mapeo
+    if body.status == "approved":
+        action = correction_doc.get("action")
+        item_text = (correction_doc.get("item") or "").strip()
+        
+        if action == "move" and correction_doc.get("to_section") and item_text:
+            # Normalizar: extraer parte descriptiva sin fecha
+            item_normalized = re.sub(r'^\d{1,2}/\d{1,2}/\d{2,4}\s*[-–]?\s*', '', item_text).strip().upper()
+            
+            target_section = correction_doc["to_section"]
+            
+            # Buscar si ya existe en el diccionario
+            existing = await mongo.section_mapping_dictionary.find_one(
+                {"item_pattern": item_normalized}
+            )
+            
+            if existing:
+                # Incrementar frecuencia y actualizar sección destino
+                await mongo.section_mapping_dictionary.update_one(
+                    {"_id": existing["_id"]},
+                    {
+                        "$set": {
+                            "target_section": target_section,
+                            "updated_at": datetime.utcnow(),
+                        },
+                        "$inc": {"frequency": 1},
+                        "$addToSet": {"source_corrections": correction_id},
+                    }
+                )
+            else:
+                # Crear nueva regla
+                await mongo.section_mapping_dictionary.insert_one({
+                    "item_pattern": item_normalized,
+                    "target_section": target_section,
+                    "source_corrections": [correction_id],
+                    "frequency": 1,
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                })
+            
+            log.info(
+                "[section-dictionary] Regla %s: '%s' -> %s (freq=%d)",
+                "actualizada" if existing else "creada",
+                item_normalized,
+                target_section,
+                (existing.get("frequency", 0) + 1) if existing else 1,
+            )
+        
+        elif action == "confirm" and correction_doc.get("from_section") and item_text:
+            # Confirmar refuerza que el item pertenece a from_section
+            item_normalized = re.sub(r'^\d{1,2}/\d{1,2}/\d{2,4}\s*[-–]?\s*', '', item_text).strip().upper()
+            target_section = correction_doc["from_section"]
+            
+            existing = await mongo.section_mapping_dictionary.find_one(
+                {"item_pattern": item_normalized}
+            )
+            
+            if existing:
+                await mongo.section_mapping_dictionary.update_one(
+                    {"_id": existing["_id"]},
+                    {
+                        "$set": {
+                            "target_section": target_section,
+                            "updated_at": datetime.utcnow(),
+                        },
+                        "$inc": {"frequency": 1},
+                        "$addToSet": {"source_corrections": correction_id},
+                    }
+                )
+            else:
+                await mongo.section_mapping_dictionary.insert_one({
+                    "item_pattern": item_normalized,
+                    "target_section": target_section,
+                    "source_corrections": [correction_id],
+                    "frequency": 1,
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                })
+    
+    # Si se revoca (volver a pending), deshacer la regla del diccionario
+    if body.status == "pending":
+        item_text = (correction_doc.get("item") or "").strip()
+        if item_text:
+            item_normalized = re.sub(r'^\d{1,2}/\d{1,2}/\d{2,4}\s*[-–]?\s*', '', item_text).strip().upper()
+            existing = await mongo.section_mapping_dictionary.find_one(
+                {"item_pattern": item_normalized}
+            )
+            if existing:
+                new_freq = existing.get("frequency", 1) - 1
+                if new_freq <= 0:
+                    # Eliminar la regla completamente
+                    await mongo.section_mapping_dictionary.delete_one({"_id": existing["_id"]})
+                    log.info("[section-dictionary] Regla eliminada: '%s' (revocada)", item_normalized)
+                else:
+                    # Decrementar frecuencia y quitar la corrección de la lista
+                    await mongo.section_mapping_dictionary.update_one(
+                        {"_id": existing["_id"]},
+                        {
+                            "$set": {"updated_at": datetime.utcnow()},
+                            "$inc": {"frequency": -1},
+                            "$pull": {"source_corrections": correction_id},
+                        }
+                    )
+                    log.info("[section-dictionary] Regla decrementada: '%s' (freq=%d)", item_normalized, new_freq)
+
+    log.info(
+        "[correction-approval] correction_id=%s status=%s by=%s",
+        correction_id, body.status, approver_name,
+    )
+    
+    return {"ok": True, "status": body.status}
+
+
+# --- Diccionario de mapeo de secciones aprendido ---
+@router.get("/feedback/section-dictionary")
+async def get_section_dictionary(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Devuelve el diccionario de mapeo de secciones aprendido a partir
+    de correcciones aprobadas. Cada regla indica qué tipo de item
+    debería ir a qué sección.
+    """
+    cursor = mongo.section_mapping_dictionary.find().sort("frequency", -1).limit(200)
+    
+    rules = []
+    async for doc in cursor:
+        rules.append({
+            "id": str(doc.get("_id")),
+            "item_pattern": doc.get("item_pattern"),
+            "target_section": doc.get("target_section"),
+            "frequency": doc.get("frequency", 1),
+            "source_corrections": doc.get("source_corrections", []),
+            "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+            "updated_at": doc.get("updated_at").isoformat() if doc.get("updated_at") else None,
+        })
+    
+    return {
+        "total": len(rules),
+        "rules": rules,
+    }
+
+
+# -----------------------------------------------------------------------------
 # Feedback de secciones generadas por IA
 # -----------------------------------------------------------------------------
 class SectionFeedbackRequest(BaseModel):
@@ -2595,6 +2863,202 @@ async def delete_evaluator_feedback(
         "ok": True,
         "deleted_count": deleted_count,
         "message": f"Se eliminaron {deleted_count} feedbacks del evaluador.",
+    }
+
+
+# -----------------------------------------------------------------------------
+# Control Dashboard - Panel de control de evaluaciones EPC
+# -----------------------------------------------------------------------------
+@router.get("/admin/dashboard-control")
+async def get_epc_dashboard_control(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Dashboard de control: KPIs, evaluaciones por usuario, últimas evaluaciones.
+    Para perfil analista/controller.
+    """
+    # Precargar nombres de pacientes desde PostgreSQL
+    patient_name_map: dict = {}
+    try:
+        patients = db.query(Patient.id, Patient.apellido, Patient.nombre, Patient.dni).all()
+        for p in patients:
+            display = f"{p.apellido}, {p.nombre}".strip(", ")
+            if p.dni:
+                display = f"{p.dni} - {display}"
+            patient_name_map[str(p.id)] = display
+    except Exception:
+        pass
+
+    # Total EPCs
+    total_epcs = await mongo.epc_docs.count_documents({})
+    total_feedbacks = await mongo.epc_feedback.count_documents({})
+
+    # --- Por usuario ---
+    user_pipeline = [
+        {
+            "$group": {
+                "_id": "$created_by_name",
+                "user_id": {"$first": "$created_by"},
+                "total_evaluations": {"$sum": 1},
+                "epcs_evaluated": {"$addToSet": "$epc_id"},
+                "ok_count": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}},
+                "partial_count": {"$sum": {"$cond": [{"$eq": ["$rating", "partial"]}, 1, 0]}},
+                "bad_count": {"$sum": {"$cond": [{"$eq": ["$rating", "bad"]}, 1, 0]}},
+                "first_evaluation": {"$min": "$created_at"},
+                "last_evaluation": {"$max": "$created_at"},
+                # Conteo por sección
+                "sec_motivo": {"$sum": {"$cond": [{"$eq": ["$section", "motivo_internacion"]}, 1, 0]}},
+                "sec_evolucion": {"$sum": {"$cond": [{"$eq": ["$section", "evolucion"]}, 1, 0]}},
+                "sec_procedimientos": {"$sum": {"$cond": [{"$eq": ["$section", "procedimientos"]}, 1, 0]}},
+                "sec_interconsultas": {"$sum": {"$cond": [{"$eq": ["$section", "interconsultas"]}, 1, 0]}},
+                "sec_medicacion": {"$sum": {"$cond": [{"$eq": ["$section", "medicacion"]}, 1, 0]}},
+                "sec_indicaciones_alta": {"$sum": {"$cond": [{"$eq": ["$section", "indicaciones_alta"]}, 1, 0]}},
+                "sec_recomendaciones": {"$sum": {"$cond": [{"$eq": ["$section", "recomendaciones"]}, 1, 0]}},
+            }
+        },
+        {"$sort": {"total_evaluations": -1}},
+    ]
+
+    by_user = []
+    evaluator_ids = set()
+    all_evaluated_epcs = set()
+
+    async for doc in mongo.epc_feedback.aggregate(user_pipeline):
+        epc_set = doc.get("epcs_evaluated", [])
+        epcs_count = len(epc_set)
+        all_evaluated_epcs.update(epc_set)
+        total = doc["total_evaluations"]
+        ok = doc["ok_count"]
+        ok_pct = round((ok / total) * 100, 1) if total > 0 else 0
+
+        evaluator_ids.add(doc["_id"])
+
+        by_user.append({
+            "user_id": doc.get("user_id") or doc["_id"],
+            "user_name": doc["_id"] or "—",
+            "total_evaluations": total,
+            "epcs_evaluated": epcs_count,
+            "ok_count": ok,
+            "partial_count": doc["partial_count"],
+            "bad_count": doc["bad_count"],
+            "ok_pct": ok_pct,
+            "first_evaluation": doc["first_evaluation"].isoformat() if doc.get("first_evaluation") else None,
+            "last_evaluation": doc["last_evaluation"].isoformat() if doc.get("last_evaluation") else None,
+            "sections_evaluated": {
+                "motivo_internacion": doc.get("sec_motivo", 0),
+                "evolucion": doc.get("sec_evolucion", 0),
+                "procedimientos": doc.get("sec_procedimientos", 0),
+                "interconsultas": doc.get("sec_interconsultas", 0),
+                "medicacion": doc.get("sec_medicacion", 0),
+                "indicaciones_alta": doc.get("sec_indicaciones_alta", 0),
+                "recomendaciones": doc.get("sec_recomendaciones", 0),
+            },
+        })
+
+    total_evaluators = len(evaluator_ids)
+    epcs_without_eval = total_epcs - len(all_evaluated_epcs)
+    avg_per_user = round(total_feedbacks / total_evaluators, 1) if total_evaluators > 0 else 0
+
+    # Tasa aprobación global
+    ok_total_pipe = [
+        {"$group": {"_id": None, "ok": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}}, "total": {"$sum": 1}}}
+    ]
+    approval = 0
+    async for agg in mongo.epc_feedback.aggregate(ok_total_pipe):
+        if agg["total"] > 0:
+            approval = round((agg["ok"] / agg["total"]) * 100, 1)
+
+    # --- Últimas evaluaciones ---
+    recent = []
+    recent_cursor = mongo.epc_feedback.find().sort("created_at", -1).limit(100)
+    async for doc in recent_cursor:
+        epc_id = doc.get("epc_id")
+        patient_name = None
+        if epc_id:
+            epc_doc = await mongo.epc_docs.find_one({"_id": epc_id}, {"patient_id": 1})
+            if epc_doc:
+                pid = str(epc_doc.get("patient_id", ""))
+                patient_name = patient_name_map.get(pid)
+
+        recent.append({
+            "user_id": doc.get("created_by"),
+            "user_name": doc.get("created_by_name") or "—",
+            "epc_id": epc_id,
+            "patient_name": patient_name,
+            "section": doc.get("section"),
+            "rating": doc.get("rating"),
+            "feedback_text": doc.get("feedback_text"),
+            "has_omissions": doc.get("has_omissions"),
+            "has_repetitions": doc.get("has_repetitions"),
+            "is_confusing": doc.get("is_confusing"),
+            "created_at": doc["created_at"].isoformat() if doc.get("created_at") else None,
+        })
+
+    # --- Evaluaciones por Paciente/EPC ---
+    epc_pipeline = [
+        {
+            "$group": {
+                "_id": "$epc_id",
+                "evaluators": {"$addToSet": "$created_by_name"},
+                "total_evaluations": {"$sum": 1},
+                "ok_count": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}},
+                "partial_count": {"$sum": {"$cond": [{"$eq": ["$rating", "partial"]}, 1, 0]}},
+                "bad_count": {"$sum": {"$cond": [{"$eq": ["$rating", "bad"]}, 1, 0]}},
+                "first_evaluation": {"$min": "$created_at"},
+                "last_evaluation": {"$max": "$created_at"},
+            }
+        },
+        {"$sort": {"last_evaluation": -1}},
+    ]
+
+    by_epc = []
+    async for doc in mongo.epc_feedback.aggregate(epc_pipeline):
+        epc_id = doc["_id"]
+        total = doc["total_evaluations"]
+        ok = doc["ok_count"]
+        ok_pct = round((ok / total) * 100, 1) if total > 0 else 0
+
+        # Buscar nombre de paciente
+        patient_name = None
+        epc_created = None
+        if epc_id:
+            epc_doc = await mongo.epc_docs.find_one(
+                {"_id": epc_id},
+                {"patient_id": 1, "created_at": 1}
+            )
+            if epc_doc:
+                pid = str(epc_doc.get("patient_id", ""))
+                patient_name = patient_name_map.get(pid)
+                epc_created = epc_doc.get("created_at")
+
+        by_epc.append({
+            "epc_id": epc_id,
+            "patient_name": patient_name or epc_id[:12] + "..." if epc_id else "—",
+            "evaluators": doc.get("evaluators", []),
+            "evaluator_count": len(doc.get("evaluators", [])),
+            "total_evaluations": total,
+            "ok_count": ok,
+            "partial_count": doc["partial_count"],
+            "bad_count": doc["bad_count"],
+            "ok_pct": ok_pct,
+            "epc_created": epc_created.isoformat() if epc_created else None,
+            "first_evaluation": doc["first_evaluation"].isoformat() if doc.get("first_evaluation") else None,
+            "last_evaluation": doc["last_evaluation"].isoformat() if doc.get("last_evaluation") else None,
+        })
+
+    return {
+        "kpis": {
+            "total_epcs": total_epcs,
+            "total_evaluations": total_feedbacks,
+            "total_evaluators": total_evaluators,
+            "avg_evaluations_per_user": avg_per_user,
+            "epcs_without_evaluation": max(epcs_without_eval, 0),
+            "approval_rate_pct": approval,
+        },
+        "by_user": by_user,
+        "by_epc": by_epc,
+        "recent_evaluations": recent,
     }
 
 

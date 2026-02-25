@@ -285,10 +285,10 @@ DEFAULT_EXCLUDED_SECTIONS = [
     "control_enfermeria",
     "epicrisis",  # Evitar confusión con epicrisis generada
     "checklist_quirofano",
-    # Procedimientos (rutinas de enfermería)
+    # Procedimientos (rutinas de enfermería y labs)
     "control",
     "enfermeria",
-    "otro",
+    "otro",  # Labs y misceláneos → van en Determinaciones de Laboratorio
     "higiene",
     "valoracion",
     "valoracion_clinica",

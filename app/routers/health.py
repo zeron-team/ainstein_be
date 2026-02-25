@@ -204,7 +204,7 @@ async def check_docker() -> Dict[str, Any]:
     """Verifica estado de Docker y containers FERRO."""
     import subprocess
     
-    expected_containers = ["ferro_postgres", "ferro_redis", "ferro_mongo", "ferro_qdrant"]
+    expected_containers = ["mongodb", "qdrant"]
     
     try:
         # Check if Docker daemon is running

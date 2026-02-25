@@ -71,6 +71,10 @@ app.include_router(external_router, prefix="/api/v1")
 from app.routers.tenants import router as tenants_router
 app.include_router(tenants_router)
 
+# ✅ NUEVO: SNOMED CT Argentina
+from app.routers.snomed import router as snomed_router
+app.include_router(snomed_router)
+
 
 @app.on_event("startup")
 async def _startup():
