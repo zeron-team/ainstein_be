@@ -321,6 +321,181 @@ async def get_hce(hce_id: str, include_text: bool = False):
     return doc
 
 
+@router.get("/{hce_id}/readable")
+async def get_hce_readable(hce_id: str):
+    """
+    Devuelve la HCE formateada como texto legible para visualización en modal.
+    Para HCEs Ainstein, formatea la historia clínica completa.
+    """
+    import re, html as html_mod
+    
+    doc = await mongo.hce_docs.find_one({"_id": _to_oid(hce_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="HCE no encontrada")
+    
+    ainstein = doc.get("ainstein", {})
+    episodio = ainstein.get("episodio", {})
+    historia = ainstein.get("historia", [])
+    
+    # Si es HCE tipo Ainstein con historia
+    if historia and isinstance(historia, list):
+        lines = []
+        
+        # Header con datos del episodio
+        lines.append("═" * 60)
+        lines.append("HISTORIA CLÍNICA ELECTRÓNICA")
+        lines.append("═" * 60)
+        
+        paci = episodio.get("paciApellidoNombre", "")
+        edad = episodio.get("paciEdad", "")
+        sexo = episodio.get("paciSexo", "")
+        tipo_alta = episodio.get("taltDescripcion", "")
+        fecha_ing = episodio.get("inteFechaIngreso", "")
+        fecha_egr = episodio.get("inteFechaEgreso", "")
+        
+        if paci:
+            lines.append(f"Paciente: {paci}")
+        if edad:
+            lines.append(f"Edad: {edad} años | Sexo: {sexo or '?'}")
+        if fecha_ing:
+            try:
+                dt = datetime.fromisoformat(str(fecha_ing).replace("Z", "+00:00"))
+                lines.append(f"Ingreso: {dt.strftime('%d/%m/%Y %H:%M')}")
+            except:
+                lines.append(f"Ingreso: {fecha_ing}")
+        if fecha_egr:
+            try:
+                dt = datetime.fromisoformat(str(fecha_egr).replace("Z", "+00:00"))
+                lines.append(f"Egreso: {dt.strftime('%d/%m/%Y %H:%M')}")
+            except:
+                lines.append(f"Egreso: {fecha_egr}")
+        if tipo_alta:
+            lines.append(f"Tipo de alta: {tipo_alta}")
+        
+        lines.append("")
+        
+        # Agrupar por tipo de registro
+        from collections import defaultdict
+        por_tipo = defaultdict(list)
+        for entry in historia:
+            tipo = entry.get("entrTipoRegistro", "OTRO")
+            por_tipo[tipo].append(entry)
+        
+        # Ordenar tipos relevantes primero
+        TIPO_ORDER = [
+            "INGRESO DE PACIENTE",
+            "EVOLUCION MEDICA (A CARGO)",
+            "EVOLUCION DE INTERCONSULTA",
+            "PARTE QUIRURGICO",
+            "PARTE PROCEDIMIENTO",
+            "EVOLUCION KINESIOLOGIA - INTERNACION GENERAL",
+            "EVOLUCION FONOAUDIOLOGIA",
+            "EVOLUCION HEMOTERAPIA",
+            "EVOLUCION EMERGENCIA",
+            "RESUMEN INTERNACION",
+            "EPICRISIS",
+        ]
+        
+        tipos_ordenados = []
+        for t in TIPO_ORDER:
+            if t in por_tipo:
+                tipos_ordenados.append(t)
+        for t in sorted(por_tipo.keys()):
+            if t not in tipos_ordenados:
+                tipos_ordenados.append(t)
+        
+        for tipo in tipos_ordenados:
+            entries = por_tipo[tipo]
+            lines.append("─" * 60)
+            lines.append(f"📋 {tipo} ({len(entries)} registros)")
+            lines.append("─" * 60)
+            
+            # Ordenar por fecha
+            def sort_key(e):
+                f = e.get("entrFechaAtencion", "")
+                try:
+                    return datetime.fromisoformat(str(f).replace("Z", "+00:00"))
+                except:
+                    return datetime.min
+            
+            for entry in sorted(entries, key=sort_key):
+                fecha = entry.get("entrFechaAtencion", "")
+                fecha_fmt = ""
+                if fecha:
+                    try:
+                        dt = datetime.fromisoformat(str(fecha).replace("Z", "+00:00"))
+                        fecha_fmt = dt.strftime("%d/%m/%Y %H:%M")
+                    except:
+                        fecha_fmt = str(fecha)
+                
+                evolucion = entry.get("entrEvolucion", "")
+                if evolucion:
+                    # Limpiar HTML
+                    evolucion = re.sub(r"<[^>]+>", " ", evolucion)
+                    evolucion = html_mod.unescape(evolucion)
+                    evolucion = re.sub(r"\s+", " ", evolucion).strip()
+                
+                motivo = entry.get("entrMotivoConsulta", "")
+                if motivo:
+                    motivo = re.sub(r"<[^>]+>", " ", motivo)
+                    motivo = html_mod.unescape(motivo)
+                    motivo = re.sub(r"\s+", " ", motivo).strip()
+                
+                if evolucion or motivo:
+                    lines.append(f"\n  [{fecha_fmt}]")
+                    if motivo:
+                        lines.append(f"  Motivo: {motivo[:500]}")
+                    if evolucion:
+                        lines.append(f"  {evolucion[:2000]}")
+                
+                # Plantillas
+                plantillas = entry.get("plantillas", []) or []
+                for pl in plantillas:
+                    grupo = pl.get("grupDescripcion", "")
+                    for prop in (pl.get("propiedades", []) or []):
+                        nombre = prop.get("grprDescripcion", "")
+                        valor = (prop.get("engpValor", "") or "").strip()
+                        if valor:
+                            valor = re.sub(r"<[^>]+>", " ", valor)
+                            valor = html_mod.unescape(valor)
+                            valor = re.sub(r"\s+", " ", valor).strip()
+                            if valor:
+                                lines.append(f"  [{grupo}] {nombre}: {valor[:500]}")
+                
+                # Diagnósticos
+                diagnosticos = entry.get("diagnosticos", []) or []
+                if diagnosticos:
+                    diags = [d.get("diagDescripcion", "") for d in diagnosticos if d.get("diagDescripcion")]
+                    if diags:
+                        lines.append(f"  Diagnósticos: {', '.join(diags)}")
+            
+            lines.append("")
+        
+        return {
+            "hce_id": str(doc["_id"]),
+            "text": "\n".join(lines),
+            "registros": len(historia),
+            "tipo": "ainstein",
+        }
+    
+    # Para HCEs subidas como PDF (tienen campo text real)
+    text = doc.get("text", "")
+    if text and not text.startswith("{"):
+        return {
+            "hce_id": str(doc["_id"]),
+            "text": text,
+            "registros": 0,
+            "tipo": "pdf",
+        }
+    
+    return {
+        "hce_id": str(doc["_id"]),
+        "text": "No hay contenido legible disponible para esta HCE.",
+        "registros": 0,
+        "tipo": "unknown",
+    }
+
+
 @router.post("/import/ainstein")
 async def import_ainstein_hce(
     payload: Dict[str, Any] = Body(...),

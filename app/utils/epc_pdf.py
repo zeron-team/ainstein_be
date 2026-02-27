@@ -123,14 +123,18 @@ def _coalesce_sections(sections: Optional[Dict[str, Any]]) -> List[tuple[str, An
         "Evolución",
         "Procedimientos",
         "Interconsultas",
-        "Plan Terapéutico",
-        "Tratamiento / Medicación",
         "Indicaciones de alta",
-        # "Notas al Alta" / "Recomendaciones" - EXCLUIDAS del PDF
     ]
     
     # Secciones excluidas del PDF
-    excluded_from_pdf = {"Notas al Alta", "Notas al alta", "notas_alta", "Recomendaciones", "recomendaciones"}
+    # Plan Terapéutico / Medicación NO se incluyen en el PDF exportado
+    excluded_from_pdf = {
+        "Notas al Alta", "Notas al alta", "notas_alta",
+        "Recomendaciones", "recomendaciones",
+        "Plan Terapéutico", "Plan terapéutico", "plan_terapeutico",
+        "Tratamiento / Medicación", "Tratamiento / Medicacion",
+        "Medicación", "medicacion",
+    }
 
     out: List[tuple[str, Any]] = []
     used = set()

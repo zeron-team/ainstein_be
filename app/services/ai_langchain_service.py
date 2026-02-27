@@ -311,12 +311,17 @@ def _post_process_epc_result(result: Dict[str, Any]) -> Dict[str, Any]:
         interconsultas_validas = []
         for ic in interconsultas:
             if isinstance(ic, str):
+                ic = ic.strip()
+                if not ic:
+                    continue
                 if tiene_fecha(ic):
-                    # Normalizar formato de fecha
+                    # Tiene fecha: normalizar formato
                     ic_normalizado = normalizar_fecha(ic)
                     interconsultas_validas.append(ic_normalizado)
                 else:
-                    log.warning(f"[PostProcess] Eliminada interconsulta sin fecha: {ic}")
+                    # Sin fecha: puede ser solo nombre de especialidad (formato JSON parser)
+                    # Mantener si es un nombre válido (no vacío)
+                    interconsultas_validas.append(ic)
         result["interconsultas"] = interconsultas_validas
         log.info(f"[PostProcess] Interconsultas procesadas: {len(interconsultas_validas)} válidas")
     
@@ -467,6 +472,14 @@ def _post_process_epc_result(result: Dict[str, Any]) -> Dict[str, Any]:
         result["medicacion"] = medicacion_corregida
         log.info(f"[PostProcess] Medicación verificada y ordenada: {len(medicacion_corregida)} items")
     
+    # =========================================================================
+    # REGLA 10: Limpiar y validar motivo de internación
+    # =========================================================================
+    from app.services.hce_json_parser import _limpiar_motivo
+    motivo = result.get("motivo_internacion", "")
+    result["motivo_internacion"] = _limpiar_motivo(motivo)
+    log.info(f"[PostProcess] Motivo final: {result['motivo_internacion']}")
+    
     return result
 
 
@@ -571,6 +584,16 @@ class LangChainAIService:
         if feedback_rules:
             system_prompt = system_prompt + feedback_rules
         
+        # 🏆 Agregar Golden Rules (Reglas de Oro) desde MongoDB
+        try:
+            from app.services.golden_rules_service import get_golden_rules_for_prompt
+            golden_rules = await get_golden_rules_for_prompt()
+            if golden_rules:
+                system_prompt = system_prompt + golden_rules
+                log.info("[LangChainAI] Golden Rules injected: %d chars", len(golden_rules))
+        except Exception as e:
+            log.warning("[LangChainAI] Could not load Golden Rules: %s", e)
+        
         # Few-shot examples si hay feedback disponible
         examples_text = ""
         if feedback_examples:
@@ -662,8 +685,29 @@ REGLA GENERAL #2: Si una sección no tiene información, deja el campo vacío o 
 REGLA GENERAL #3: Responde ÚNICAMENTE con JSON válido.
 
 ================================================================================
+📋 SECCIÓN: MOTIVO DE INTERNACIÓN - REGLAS OBLIGATORIAS
+================================================================================
+
+⛔ REGLA CRÍTICA - MOTIVO DE INTERNACIÓN:
+- MÁXIMO 10 PALABRAS. Sin excepciones.
+- Debe ser un resumen lógico perfecto extraído de la EVOLUCIÓN MÉDICA.
+- NO copiar textos largos. NO incluir fechas. NO incluir nombres de paciente.
+- Ejemplo CORRECTO: "Fractura de cadera derecha por caída"
+- Ejemplo CORRECTO: "Neumonía adquirida en la comunidad"
+- Ejemplo INCORRECTO: "Paciente de 85 años que ingresa por caída de propia altura con fractura de cadera derecha el día 15/03"
+- Si no hay información clara, escribir: "No especificado en HCE"
+- NUNCA dejar vacío.
+
+================================================================================
 📋 SECCIÓN: EVOLUCIÓN - REGLAS OBLIGATORIAS
 ================================================================================
+
+⛔ REGLA CRÍTICA - FUENTE DE EVOLUCIÓN:
+- USAR EXCLUSIVAMENTE la sección "EVOLUCIÓN MÉDICA" de la HCE.
+- DESCARTAR completamente notas de enfermería, controles de enfermería, balances hidroelectrolíticos.
+- DESCARTAR evoluciones de interconsulta (van en sección aparte).
+- Si hay información de enfermería mezclada en el texto, IGNORARLA completamente.
+- Redactar en estilo médico técnico, como pase entre colegas.
 
 ⛔⛔⛔ REGLA CRÍTICA DE FALLECIMIENTO/ÓBITO - NO NEGOCIABLE ⛔⛔⛔
 

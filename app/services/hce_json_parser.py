@@ -248,6 +248,30 @@ def clean_html_text(text: str) -> str:
     return cleaned.strip()
 
 
+def _limpiar_motivo(motivo: str) -> str:
+    """
+    REGLA DE ORO: Motivo de internación = EXACTAMENTE lo que está en la HCE.
+    
+    Solo limpia HTML tags y espacios. NO modifica el contenido médico.
+    """
+    if not motivo:
+        return "No especificado en HCE"
+    
+    motivo = motivo.strip()
+    
+    # Solo limpiar tags HTML y entidades
+    motivo = re.sub(r"<[^>]+>", "", motivo).strip()
+    motivo = html.unescape(motivo) if motivo else motivo
+    
+    # Normalizar espacios
+    motivo = re.sub(r'\s+', ' ', motivo).strip()
+    
+    if not motivo or len(motivo) < 3:
+        return "No especificado en HCE"
+    
+    return motivo
+
+
 def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
     """
     Parsea un documento HCE de MongoDB y extrae datos estructurados.
@@ -304,28 +328,10 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
         fecha = entry.get("entrFechaAtencion", "")
         
         # =====================================================================
-        # 0. Extraer MOTIVO DE CONSULTA de entrMotivoConsulta (fuente principal)
+        # 0. Motivo: NO usar entrMotivoConsulta ni evolución como fuente.
+        # El motivo SOLO se extrae de plantillas con campo "Motivo de Internación"
+        # o "Motivo de Ingreso" (ver sección 6: Procesar PLANTILLAS).
         # =====================================================================
-        motivo_consulta = (entry.get("entrMotivoConsulta") or "").strip()
-        if motivo_consulta and not result["motivo_internacion"]:
-            # Limpiar HTML tags
-            motivo_limpio = re.sub(r"<[^>]+>", "", motivo_consulta).strip()
-            if motivo_limpio and len(motivo_limpio) > 3:
-                result["motivo_internacion"] = motivo_limpio
-                log.info(f"[HCEJsonParser] Motivo extraído de entrMotivoConsulta: {motivo_limpio[:80]}")
-        
-        # Si es INGRESO o PARTE PROCEDIMIENTO, intentar extraer motivo de evolución
-        if not result["motivo_internacion"] and tipo_registro in (
-            "INGRESO DE PACIENTE", "PARTE PROCEDIMIENTO"
-        ):
-            evol_text = (entry.get("entrEvolucion") or "").strip()
-            evol_text = clean_html_text(evol_text) if evol_text else ""
-            if evol_text and len(evol_text) > 10:
-                # Usar primera oración o primeros 200 chars como motivo
-                first_sentence = evol_text.split(".")[0].strip()
-                if first_sentence and len(first_sentence) > 5:
-                    result["motivo_internacion"] = first_sentence
-                    log.info(f"[HCEJsonParser] Motivo extraído de {tipo_registro}: {first_sentence[:80]}")
         
         # Parsear fecha
         fecha_str = ""
@@ -458,12 +464,20 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
                 seen_diags.add(desc)
                 result["diagnosticos"].append(desc)
         
-        # 4. Extraer EVOLUCIONES
+        # 4. Extraer EVOLUCIONES — REGLA DE ORO: SOLO EVOLUCIÓN MÉDICA
+        # Descartamos enfermería, interconsultas (tienen sección propia),
+        # controles, balances, y cualquier otro tipo no médico.
+        TIPOS_EVOLUCION_VALIDOS = {
+            "EVOLUCION MEDICA (A CARGO)",
+            "INGRESO DE PACIENTE",
+            "PARTE QUIRURGICO",
+            "PARTE PROCEDIMIENTO",
+        }
         evolucion = entry.get("entrEvolucion", "")
         if evolucion:
             # Limpiar entidades HTML
             evolucion = clean_html_text(evolucion)
-        if evolucion and len(evolucion) > 50:
+        if evolucion and len(evolucion) > 50 and tipo_registro in TIPOS_EVOLUCION_VALIDOS:
             result["evoluciones"].append({
                 "tipo": tipo_registro,
                 "fecha": fecha_str,
@@ -505,13 +519,29 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
         if tipo_registro == "PARTE QUIRURGICO":
             result["parte_quirurgico"] = evolucion or ""
         
-        # 6. Procesar PLANTILLAS (Epicrisis, Anamnesis, etc.)
+        # 6. Procesar PLANTILLAS (Anamnesis, Resumen Internacion, etc.)
+        # ⛔ EXCLUIR EPICRISIS: el usuario pide que NO se use esta sección
         plantillas = entry.get("plantillas", []) or []
         for plantilla in plantillas:
             grupo = plantilla.get("grupDescripcion", "")
             propiedades = plantilla.get("propiedades", []) or []
             
-            if grupo == "ANAMNESIS":
+            # RESUMEN INTERNACION: Máxima prioridad para motivo
+            if grupo == "RESUMEN INTERNACION":
+                for prop in propiedades:
+                    nombre = prop.get("grprDescripcion", "")
+                    valor = prop.get("engpValor", "") or ""
+                    valor = clean_html_text(valor) if valor else ""
+                    
+                    nombre_lower = nombre.lower()
+                    if "motivo" in nombre_lower and ("internaci" in nombre_lower or "ingreso" in nombre_lower):
+                        motivo = re.sub(r"<[^>]+>", "", valor).strip()
+                        if motivo:
+                            # RESUMEN INTERNACION siempre sobreescribe (máxima prioridad)
+                            result["motivo_internacion"] = motivo
+                            log.info(f"[HCEJsonParser] Motivo de RESUMEN INTERNACION: {motivo[:80]}")
+            
+            elif grupo == "ANAMNESIS":
                 for prop in propiedades:
                     nombre = prop.get("grprDescripcion", "")
                     valor = prop.get("engpValor", "") or ""
@@ -519,8 +549,9 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
                     # Limpiar HTML entities PRIMERO
                     valor = clean_html_text(valor) if valor else ""
                     
-                    if "Motivo de Internación" in nombre:
-                        # Limpiar tags HTML
+                    nombre_lower = nombre.lower()
+                    if "motivo" in nombre_lower and ("internaci" in nombre_lower or "ingreso" in nombre_lower) and not result["motivo_internacion"]:
+                        # Solo si no hay motivo aún (RESUMEN INTERNACION tiene prioridad)
                         motivo = re.sub(r"<[^>]+>", "", valor).strip()
                         if motivo:
                             result["motivo_internacion"] = motivo
@@ -548,22 +579,33 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
                                             "frecuencia": "",
                                         })
             
+            # ⛔ EPICRISIS EXCLUIDA: no extraer motivo de esta sección
+            # (solo tratamiento al alta y plan de seguimiento si existen)
             elif grupo == "EPICRISIS":
                 for prop in propiedades:
                     nombre = prop.get("grprDescripcion", "")
                     valor = prop.get("engpValor", "") or ""
-                    
-                    # Limpiar HTML entities
                     valor = clean_html_text(valor) if valor else ""
-                    
-                    if "Motivo de Internación" in nombre and not result["motivo_internacion"]:
-                        motivo = re.sub(r"<[^>]+>", "", valor).strip()
-                        result["motivo_internacion"] = motivo
                     
                     if "Tratamiento al alta" in nombre:
                         result["tratamiento_alta"] = re.sub(r"<[^>]+>", "", valor).strip()
                     if "Plan de seguimiento" in nombre:
                         result["plan_seguimiento"] = re.sub(r"<[^>]+>", "", valor).strip()
+            
+            # Cualquier otra plantilla: buscar campo "Motivo" (case-insensitive)
+            else:
+                if not result["motivo_internacion"]:
+                    for prop in propiedades:
+                        nombre = prop.get("grprDescripcion", "")
+                        valor = prop.get("engpValor", "") or ""
+                        nombre_lower = nombre.lower()
+                        # Buscar campo que diga "motivo" + alguna variante
+                        if "motivo" in nombre_lower and any(x in nombre_lower for x in ["internaci", "ingreso", "consulta"]):
+                            valor = clean_html_text(valor) if valor else ""
+                            motivo = re.sub(r"<[^>]+>", "", valor).strip()
+                            if motivo and len(motivo) > 3:
+                                result["motivo_internacion"] = motivo
+                                log.info(f"[HCEJsonParser] Motivo de plantilla [{grupo}]: {motivo[:80]}")
     
     # 7. Extraer medicación PREVIA del texto de evoluciones
     # TODO: DESHABILITADO - el parser está extrayendo basura
@@ -576,6 +618,13 @@ def parse_hce_json(hce_doc: Dict[str, Any]) -> Dict[str, Any]:
     #             if med["farmaco"].upper() not in seen_prev:
     #                 seen_prev.add(med["farmaco"].upper())
     #                 result["medicacion"].append(med)
+    
+    # 8. Motivo: NO usar evolución como fallback.
+    # El motivo SOLO viene de plantillas explícitas (Motivo de Internación/Ingreso).
+    # Si ninguna plantilla lo tiene, queda como "No especificado en HCE".
+    
+    # 9. REGLA DE ORO: Limpiar y normalizar motivo de internación
+    result["motivo_internacion"] = _limpiar_motivo(result["motivo_internacion"])
     
     log.info(f"[HCEJsonParser] Extraído: meds={len(result['medicacion'])}, "
              f"procs={len(result['procedimientos'])}, diags={len(result['diagnosticos'])}")
@@ -786,35 +835,46 @@ def sort_and_group_procedures(
     # Ordenar cronológicamente
     important_procs.sort(key=parse_date)
     
-    result = []
-    seen = set()  # Evitar duplicados
+    # NUEVO: Agrupar procedimientos por nombre, acumular fechas
+    from collections import OrderedDict
+    procs_por_nombre: OrderedDict = OrderedDict()
     
-    # Laboratorios NO van en procedimientos - van en Determinaciones de Laboratorio
-    # (se extraen aparte con extract_lab_procedures)
-    
-    # Procesar procedimientos importantes (sin emojis)
     for p in important_procs:
         fecha = p.get("fecha", "")
         descripcion = p.get("descripcion", "")
-        
-        # Clave única para evitar duplicados (solo por descripción, no fecha)
         desc_key = descripcion.upper().strip()
-        if desc_key in seen:
-            continue
-        seen.add(desc_key)
         
-        # Formato limpio
-        if fecha and descripcion:
-            result.append(f"{fecha} - {descripcion}")
-        elif descripcion:
-            result.append(descripcion)
+        if desc_key not in procs_por_nombre:
+            procs_por_nombre[desc_key] = {
+                "nombre": descripcion,
+                "fechas": [],
+            }
+        if fecha and fecha not in procs_por_nombre[desc_key]["fechas"]:
+            procs_por_nombre[desc_key]["fechas"].append(fecha)
+    
+    result = []
+    for desc_key, info in procs_por_nombre.items():
+        nombre = info["nombre"]
+        fechas = info["fechas"]
+        
+        # Formato: "Nombre (fecha1, fecha2)" o solo "Nombre" si no hay fechas
+        if fechas:
+            # Ordenar fechas cronológicamente
+            try:
+                fechas_sorted = sorted(fechas, key=lambda f: datetime.strptime(f, "%d/%m/%Y"))
+            except:
+                fechas_sorted = fechas
+            fechas_str = ", ".join(fechas_sorted)
+            result.append(f"{nombre} ({fechas_str})")
+        else:
+            result.append(nombre)
     
     # Agregar AKM agrupado al final si hubo
     if akm_count > 0:
         result.append(f"Asistencia kinésica motora durante la internación ({akm_count} sesiones)")
     
     print(f"[PostProcess] Procedimientos finales: {len(result)} items")
-    for i, item in enumerate(result[:5]):  # Mostrar primeros 5
+    for i, item in enumerate(result[:5]):
         print(f"  [{i}] {item[:80]}...")
     
     return result
@@ -952,9 +1012,9 @@ def extract_studies_chronologically(
     # Ordenar cronológicamente (para que el primero de cada tipo sea el más antiguo)
     studies.sort(key=parse_date)
     
-    # Agrupar por tipo de estudio (nombre normalizado)
-    # Diccionario: nombre_normalizado -> (primera_fecha, descripcion_original)
-    estudios_por_tipo: dict = {}
+    # NUEVO: Agrupar estudios por nombre, acumular TODAS las fechas
+    from collections import OrderedDict
+    estudios_por_tipo: OrderedDict = OrderedDict()
     
     for p in studies:
         fecha = p.get("fecha", "")
@@ -965,30 +1025,28 @@ def extract_studies_chronologically(
         if clasificacion:
             nombre_norm = clasificacion["nombre"]
         else:
-            # Si no se puede clasificar, usar descripción original (normalizada)
             nombre_norm = descripcion.strip()
         
-        # Solo guardar la primera ocurrencia (ya está ordenado cronológicamente)
         if nombre_norm not in estudios_por_tipo:
-            estudios_por_tipo[nombre_norm] = fecha
+            estudios_por_tipo[nombre_norm] = []
+        if fecha and fecha not in estudios_por_tipo[nombre_norm]:
+            estudios_por_tipo[nombre_norm].append(fecha)
     
-    # Construir resultado ordenado por primera fecha
-    result_items = []
-    for nombre, fecha in estudios_por_tipo.items():
-        if fecha:
-            # Parsear fecha para ordenar
+    # Construir resultado: "Nombre (fecha1, fecha2)"
+    result = []
+    for nombre, fechas in estudios_por_tipo.items():
+        if fechas:
+            # Ordenar fechas cronológicamente
             try:
-                dt = datetime.strptime(fecha, "%d/%m/%Y")
+                fechas_sorted = sorted(fechas, key=lambda f: datetime.strptime(f, "%d/%m/%Y"))
             except:
-                dt = datetime.max
-            result_items.append((dt, f"{fecha} - {nombre}"))
+                fechas_sorted = fechas
+            fechas_str = ", ".join(fechas_sorted)
+            result.append(f"{nombre} ({fechas_str})")
         else:
-            result_items.append((datetime.max, nombre))
+            result.append(nombre)
     
-    # Ordenar por fecha
-    result_items.sort(key=lambda x: x[0])
-    
-    return [item[1] for item in result_items]
+    return result
 
 
 
@@ -1015,34 +1073,22 @@ def extract_interconsultas_chronologically(
     # Ordenar cronológicamente (para que la primera de cada especialidad sea la más antigua)
     sorted_ic = sorted(interconsultas, key=parse_date)
     
-    # Agrupar por especialidad - solo guardar primera ocurrencia de cada una
-    # Diccionario: especialidad -> primera_fecha
-    ic_por_especialidad: dict = {}
+    # Agrupar por especialidad - sin fecha, solo nombre de especialidad
+    especialidades_vistas: set = set()
+    result = []
     
     for ic in sorted_ic:
-        fecha = ic.get("fecha", "")
         especialidad = ic.get("especialidad", "Clínica Médica").strip()
         
-        # Solo guardar la primera ocurrencia de cada especialidad
-        if especialidad not in ic_por_especialidad:
-            ic_por_especialidad[especialidad] = fecha
+        # Solo una vez por especialidad
+        if especialidad not in especialidades_vistas:
+            especialidades_vistas.add(especialidad)
+            result.append(especialidad)
     
-    # Construir resultado ordenado por primera fecha
-    result_items = []
-    for especialidad, fecha in ic_por_especialidad.items():
-        if fecha:
-            try:
-                dt = datetime.strptime(fecha, "%d/%m/%Y")
-            except:
-                dt = datetime.max
-            result_items.append((dt, f"{fecha} - {especialidad}"))
-        else:
-            result_items.append((datetime.max, especialidad))
+    # Ordenar alfabéticamente
+    result.sort()
     
-    # Ordenar por fecha
-    result_items.sort(key=lambda x: x[0])
-    
-    return [item[1] for item in result_items]
+    return result
 
 
 async def generate_epc_from_json(
@@ -1485,65 +1531,84 @@ Responde SOLO con JSON válido:
         log.warning(f"[EPC-JSON] Could not apply post-processing: {e}")
     
     # =========================================================================
-    # 9. ⛔ REGLA OBLIGATORIA: Si taltDescripcion es OBITO, FORZAR formato
-    # Según REGLAS_GENERACION_EPC.md: Subsección separada al final
+    # 9. ⛔ REGLA: Si taltDescripcion es OBITO, verificar contra texto
+    # IMPORTANTE: El campo taltDescripcion puede estar EQUIVOCADO en Markey.
+    # Si el texto de evolución indica claramente que el paciente está vivo
+    # (alta médica, internación domiciliaria, se retira, etc.), NO forzar OBITO.
     # =========================================================================
     if es_obito_por_alta:
         evolucion_actual = result.get("evolucion", "")
+        evolucion_lower = evolucion_actual.lower()
         
-        # SIEMPRE reformatear si hay óbito (incluye limpieza de formato viejo)
-        # Buscar fecha de egreso
-        fecha_egreso = episodio.get("inteFechaEgreso", "")
-        if fecha_egreso:
-            try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(fecha_egreso.replace("Z", "+00:00"))
-                fecha_str = dt.strftime("%d/%m/%Y")
-                hora_str = dt.strftime("%H:%M")
-            except:
+        # Indicadores claros de que el paciente está VIVO y fue dado de alta
+        INDICADORES_ALTA_VIVO = [
+            "se retira", "se da de alta", "alta médica", "alta sanatorial",
+            "egreso a domicilio", "internación domiciliaria", "internacion domiciliaria",
+            "se indica internación domiciliaria", "se indica internacion domiciliaria",
+            "dado de alta", "dada de alta", "alta hospitalaria",
+            "controles ambulatorios", "seguimiento ambulatorio",
+            "control por consultorio", "se otorga el alta",
+            "mejoría del estado general", "mejoria del estado general",
+            "hemodinámicamente estable", "hemodinamicamente estable",
+            "afebril", "evolución favorable", "evolucion favorable",
+            "se va de alta", "egresa",
+        ]
+        
+        paciente_vivo = any(ind in evolucion_lower for ind in INDICADORES_ALTA_VIVO)
+        
+        # Verificar también con el módulo de death detection
+        from app.rules.death_detection import detect_death_in_text
+        death_info = detect_death_in_text(evolucion_actual)
+        
+        if paciente_vivo and not death_info.detected:
+            # ⛔ CONTRADICCIÓN: taltDescripcion dice OBITO pero el texto dice VIVO
+            log.warning(f"[EPC-JSON] ⛔ CONTRADICCIÓN DETECTADA: taltDescripcion={tipo_alta} pero texto indica paciente VIVO")
+            log.warning(f"[EPC-JSON] Suprimiendo DESENLACE: ÓBITO forzado - el texto médico es la fuente de verdad")
+            es_obito_por_alta = False  # Suprimir
+        else:
+            # Óbito legítimo: proceder con el formateo
+            fecha_egreso = episodio.get("inteFechaEgreso", "")
+            if fecha_egreso:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(fecha_egreso.replace("Z", "+00:00"))
+                    fecha_str = dt.strftime("%d/%m/%Y")
+                    hora_str = dt.strftime("%H:%M")
+                except:
+                    fecha_str = "fecha no registrada"
+                    hora_str = "hora no registrada"
+            else:
                 fecha_str = "fecha no registrada"
                 hora_str = "hora no registrada"
-        else:
-            fecha_str = "fecha no registrada"
-            hora_str = "hora no registrada"
-        
-        # ⚠️ LIMPIAR TODOS los formatos de ÓBITO generados por la IA
-        patrones_obito_limpiar = [
-            # Formato viejo: "PACIENTE OBITÓ - Fecha: XX Hora: YY. algo."
-            r"PACIENTE OBIT[OÓ]\s*[-–—]\s*Fecha:\s*[^\n.]*(?:\.|$)\s*",
-            r"^PACIENTE OBIT[OÓ][^\n]*\n*",
-            r"PACIENTE OBIT[OÓ][^.]*\.\s*",
-            # Bloques con --- separadores
-            r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?\s*Fecha[^-]*---\s*",
-            r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?[^-]*---\s*",
-            # Líneas sueltas de DESENLACE: ÓBITO (generadas por la IA)
-            r"\n*\**DESENLACE:\s*[ÓO]BITO\**[^\n]*\n*",
-            # Líneas tipo "Fecha: XX/XX/XXXX | Hora: XX:XX" si están al final solas
-            r"\n*Fecha:\s*\d{2}/\d{2}/\d{4}\s*\|\s*Hora:\s*\d{2}:\d{2}\s*$",
-        ]
-        for patron in patrones_obito_limpiar:
-            evolucion_actual = re.sub(patron, "", evolucion_actual, flags=re.IGNORECASE | re.MULTILINE)
-        
-        # Eliminar frases contradictorias de alta
-        frases_eliminar = [
-            r"[^.]*(?:se retira|deambulando|por sus propios medios|dada de alta|dado de alta)[^.]*\.?\s*",
-            r"[^.]*(?:alta médica|alta hospitalaria)[^.]*\.?\s*",
-        ]
-        for patron in frases_eliminar:
-            evolucion_actual = re.sub(patron, "", evolucion_actual, flags=re.IGNORECASE)
-        
-        # Limpiar separadores --- y espacios duplicados
-        evolucion_actual = re.sub(r'---', '', evolucion_actual)
-        evolucion_actual = re.sub(r'\n{3,}', '\n\n', evolucion_actual).strip()
-        
-        # ⚠️ AGREGAR DESENLACE como LÍNEA SIMPLE al final (sin --- ni cuadros)
-        result["evolucion"] = evolucion_actual + f"\n\nDESENLACE: ÓBITO - Fecha: {fecha_str} | Hora: {hora_str}"
-        
-        # Limpiar indicaciones y recomendaciones
-        result["indicaciones_alta"] = []
-        result["recomendaciones"] = []
-        
-        log.info(f"[EPC-JSON] ⛔ FORZADO DESENLACE: ÓBITO al final desde taltDescripcion: {tipo_alta}")
+            
+            # Limpiar formatos de ÓBITO generados por la IA
+            patrones_obito_limpiar = [
+                r"PACIENTE OBIT[OÓ]\s*[-–—]\s*Fecha:\s*[^\n.]*(?:\.|$)\s*",
+                r"^PACIENTE OBIT[OÓ][^\n]*\n*",
+                r"PACIENTE OBIT[OÓ][^.]*\.\s*",
+                r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?\s*Fecha[^-]*---\s*",
+                r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?[^-]*---\s*",
+                r"\n*\**DESENLACE:\s*[ÓO]BITO\**[^\n]*\n*",
+                r"\n*Fecha:\s*\d{2}/\d{2}/\d{4}\s*\|\s*Hora:\s*\d{2}:\d{2}\s*$",
+            ]
+            for patron in patrones_obito_limpiar:
+                evolucion_actual = re.sub(patron, "", evolucion_actual, flags=re.IGNORECASE | re.MULTILINE)
+            
+            frases_eliminar = [
+                r"[^.]*(?:se retira|deambulando|por sus propios medios|dada de alta|dado de alta)[^.]*\.?\s*",
+                r"[^.]*(?:alta médica|alta hospitalaria)[^.]*\.?\s*",
+            ]
+            for patron in frases_eliminar:
+                evolucion_actual = re.sub(patron, "", evolucion_actual, flags=re.IGNORECASE)
+            
+            evolucion_actual = re.sub(r'---', '', evolucion_actual)
+            evolucion_actual = re.sub(r'\n{3,}', '\n\n', evolucion_actual).strip()
+            
+            result["evolucion"] = evolucion_actual + f"\n\nDESENLACE: ÓBITO - Fecha: {fecha_str} | Hora: {hora_str}"
+            result["indicaciones_alta"] = []
+            result["recomendaciones"] = []
+            
+            log.info(f"[EPC-JSON] ⛔ FORZADO DESENLACE: ÓBITO al final desde taltDescripcion: {tipo_alta}")
     
     # =========================================================================
     # 10. ⛔ VALIDACIÓN ANTI-ALUCINACIÓN: Cruzar ÓBITO en texto vs taltDescripcion
@@ -1554,7 +1619,7 @@ Responde SOLO con JSON válido:
     
     # Detectar si hay mención de muerte/óbito en el texto
     tiene_obito_texto = re.search(
-        r"PACIENTE OBIT[OÓ]|DESENLACE:\s*[ÓO]BITO|constata [óo]bito|se certifica (?:la )?defunci[óo]n|falleci[óo]|exitus",
+        r"PACIENTE OBIT[OÓ]|DESENLACE:\s*[ÓO]BITO|constata [óo]bito|se certifica (?:la )?defunci[óo]n|falleci[óo]|fallece|falleciendo|exitus|deceso",
         evolucion_final, re.IGNORECASE
     )
     
@@ -1563,16 +1628,28 @@ Responde SOLO con JSON válido:
         log.warning(f"[EPC-JSON] ⛔⛔⛔ ALUCINACIÓN DETECTADA: IA generó ÓBITO pero taltDescripcion={tipo_alta}")
         log.warning(f"[EPC-JSON] Eliminando falso óbito del texto")
         
-        # Limpiar TODAS las menciones de muerte/óbito
+        # Limpiar TODAS las menciones de muerte/óbito (exhaustivo)
         patrones_limpiar = [
+            # Formato DESENLACE (generado por nuestro código o IA)
+            r"\n*\**DESENLACE:\s*[ÓO]BITO\**[^\n]*\n*",
+            r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?[^-]*---\s*",
+            r"DESENLACE:\s*[ÓO]BITO[^\n]*\n*",
+            # Formato PACIENTE OBITÓ
             r"PACIENTE OBIT[OÓ]\s*[-–—]\s*Fecha:[^\n.]*(?:\.|$)\s*",
             r"PACIENTE OBIT[OÓ][^.]*\.\s*",
-            r"---\s*\*?\*?DESENLACE:\s*[ÓO]BITO\*?\*?[^-]*---\s*",
+            r"^PACIENTE OBIT[OÓ][^\n]*\n*",
+            # Frases de fallecimiento
             r"[Ss]e constata [óo]bito[^.]*\.\s*",
             r"[Ss]e certifica (?:la )?defunci[óo]n[^.]*\.\s*",
+            r"[Ee]l paciente fallec[eió][^.]*\.\s*",
+            r"[Ll]a paciente fallec[eió][^.]*\.\s*",
+            r"[Ff]allec(?:ió|e|iendo)[^.]*\.\s*",
+            # Línea de Fecha/Hora suelta al final
+            r"\n*Fecha:\s*(?:fecha\s+)?no\s+registrada[^\n]*\n*$",
+            r"\n*Fecha:\s*\d{2}/\d{2}/\d{4}\s*\|\s*Hora:[^\n]*\n*$",
         ]
         for patron in patrones_limpiar:
-            evolucion_final = re.sub(patron, "", evolucion_final, flags=re.IGNORECASE)
+            evolucion_final = re.sub(patron, "", evolucion_final, flags=re.IGNORECASE | re.MULTILINE)
         
         evolucion_final = re.sub(r'\n{3,}', '\n\n', evolucion_final).strip()
         result["evolucion"] = evolucion_final
@@ -1616,6 +1693,36 @@ Fecha: {fecha_str} | Hora: {hora_str}
             log.info(f"[EPC-JSON] ⛔ REFORMATEADO ÓBITO legítimo: {fecha_str} {hora_str}")
     
     log.info(f"[EPC-JSON] EPC generada: meds={len(sorted_meds)}, procs={len(sorted_procs)}, ics={len(interconsultas_formatted)}")
+    
+    # ------------------------------------------------------------------
+    # FALLBACK: Si motivo está vacío, inferir con LLM desde evolución
+    # ------------------------------------------------------------------
+    _m = (result.get("motivo_internacion") or "").strip()
+    print(f"[EPC-JSON] MOTIVO-FALLBACK check: motivo='{_m}' evolucion_len={len(result.get('evolucion', ''))}")
+    if not _m or _m.lower() in ("no especificado en hce", "no especificado"):
+        _evo = (result.get("evolucion") or "")[:4000]
+        if _evo and len(_evo) > 50:
+            try:
+                print("[EPC-JSON] MOTIVO-FALLBACK: Inferiendo motivo con LLM...")
+                _fb_ai = GeminiAIService()
+                _fb_prompt = (
+                    "Eres un médico clínico experto. A partir del siguiente texto de evolución clínica, "
+                    "determina cuál fue el MOTIVO DE INTERNACIÓN del paciente. "
+                    "Responde ÚNICAMENTE el motivo, en lenguaje médico profesional, "
+                    "máximo 30 palabras. NO incluyas la edad, sexo ni fecha de ingreso. "
+                    "Sé conciso y preciso. Responde SOLO el texto del motivo, sin comillas ni explicaciones.\n\n"
+                    f"Evolución clínica:\n{_evo}"
+                )
+                _fb_result = await _fb_ai.generate_epc(_fb_prompt, want_json=False)
+                _fb_text = (_fb_result.get("raw_text", "") if isinstance(_fb_result, dict) else str(_fb_result)).strip().strip('"').strip("'").strip()
+                _fb_words = _fb_text.split()
+                if len(_fb_words) > 30:
+                    _fb_text = " ".join(_fb_words[:30])
+                if _fb_text and len(_fb_text) > 5:
+                    result["motivo_internacion"] = f"No especificado en HCE ({_fb_text})"
+                    print(f"[EPC-JSON] MOTIVO-FALLBACK OK: {result['motivo_internacion'][:100]}")
+            except Exception as e:
+                print(f"[EPC-JSON] MOTIVO-FALLBACK ERROR: {e}")
     
     return result
 

@@ -67,17 +67,25 @@ class EPCPreValidator:
             corrections["tipo_alta"] = tipo_alta
         
         # 2. Detectar óbito en texto de evoluciones (backup)
+        # ⛔ IMPORTANTE: Si tipo_alta NO es OBITO, el texto NO puede forzar is_obito.
+        # El tipo_alta del sistema Markey es la FUENTE DE VERDAD para fallecimiento.
+        # Solo agregamos un warning informativo.
         if not is_obito:
             for evol in parsed_hce.sections.evoluciones_medicas:
                 contenido = evol.get("contenido", "")
                 death_result = detect_death_in_text(contenido)
                 if death_result.detected:
-                    is_obito = True
+                    # NO setear is_obito = True
+                    # Solo informar como warning
                     warnings.append(
-                        f"Óbito detectado en evolución ({death_result.detection_method}) "
-                        f"pero tipo_alta es '{tipo_alta}'"
+                        f"Texto de evolución menciona fallecimiento ({death_result.detection_method}) "
+                        f"pero tipo_alta es '{tipo_alta}' - NO se fuerza OBITO"
                     )
-                    corrections["obito_detected_in_text"] = True
+                    corrections["obito_mencionado_en_texto"] = True
+                    log.warning(
+                        f"[PreValidator] Texto menciona muerte pero tipo_alta='{tipo_alta}'. "
+                        f"NO se fuerza OBITO. El tipo_alta es la fuente de verdad."
+                    )
                     break
         
         # 3. Validar consistencia de datos

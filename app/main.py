@@ -75,6 +75,10 @@ app.include_router(tenants_router)
 from app.routers.snomed import router as snomed_router
 app.include_router(snomed_router)
 
+# ✅ NUEVO: Golden Rules (Reglas de Oro)
+from app.routers.golden_rules import router as golden_rules_router
+app.include_router(golden_rules_router)
+
 
 @app.on_event("startup")
 async def _startup():

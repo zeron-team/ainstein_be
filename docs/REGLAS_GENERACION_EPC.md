@@ -1,408 +1,248 @@
-# Reglas de Generación de Epicrisis (EPC)
+# 📋 Reglas de Generación de Epicrisis (EPC)
 
-Este documento define las reglas OBLIGATORIAS que la IA debe cumplir al generar cada sección de la Epicrisis.
+> **Versión:** 2.0  
+> **Última actualización:** 2026-02-27  
+> **Autor:** AInstein Engine Team  
 
----
-
-## 🎯 TABLA DE DECISIÓN RÁPIDA - CLASIFICACIÓN DE SECCIONES
-
-> **Regla de Oro**: 
-> - Si el acto principal es "**mirar/medir**" sin invadir → **Estudio**
-> - Si el acto principal es "**hacer**" invasivo/intervencionista → **Procedimiento**
-> - Si el acto principal es "**opinar/evaluar**" por otra especialidad → **Interconsulta**
-> - Si es análisis de muestras biológicas → **Laboratorio**
-
-| Categoría | Ejemplos | Sección Correcta |
-|-----------|----------|------------------|
-| **Imágenes** | Rx, Eco, TAC, RM, mamografía, densitometría | **Estudios Complementarios** |
-| **Funcionales no invasivos** | ECG, Holter, MAPA, PEG, Ecocardiograma, EEG | **Estudios Complementarios** |
-| **Endoscópicos** | VEDA, colonoscopía, broncoscopía, CPRE | **Procedimientos** |
-| **Invasivos/Intervencionistas** | Biopsia, punción, cateterismo, CVC, intubación | **Procedimientos** |
-| **Terapéuticos invasivos** | Transfusión, diálisis, cardioversión, RCP | **Procedimientos** |
-| **Evaluaciones por especialidad** | "Visto por Cardio/Infecto/Neuro indica..." | **Interconsultas** |
-| **Análisis de muestras** | Hemograma, urea, creatinina, PCR, hemocultivos | **Laboratorio** |
+Este documento define **todas** las reglas que el sistema aplica para generar Epicrisis (EPC).  
+Las reglas se aplican en **5 capas secuenciales** durante el pipeline de generación.
 
 ---
 
-## ⛔ REGLAS CRÍTICAS - NO SE PUEDEN OMITIR
-
-### 📋 SECCIÓN: EVOLUCIÓN
-
-**REGLA DE FALLECIMIENTO/ÓBITO:**
-
-Si el paciente fallece durante la internación, la evolución debe tener esta estructura:
-
-1. **PRIMERO**: Describir TODA la evolución clínica durante la internación
-2. **AL FINAL**: Agregar una SUBSECCIÓN SEPARADA con el siguiente formato:
+## Arquitectura del Pipeline
 
 ```
-[... texto de evolución incluyendo circunstancias del fallecimiento ...]
-
----
-**DESENLACE: ÓBITO**
-Fecha: DD/MM/YYYY | Hora: HH:MM
----
-```
-
-**⚠️ REGLAS CRÍTICAS:**
-- El bloque de ÓBITO debe estar **SIEMPRE AL FINAL** de la evolución
-- Debe estar **SEPARADO** del resto del texto por líneas en blanco
-- **SOLO** incluir fecha y hora, SIN descripción (la descripción ya está en la evolución)
-- **NUNCA** mezclar el texto de ÓBITO con los párrafos de evolución clínica
-
-**Palabras clave que activan esta regla:**
-- fallece, falleció, fallecio, falleciendo
-- óbito, obito, obitó, éxitus, exitus
-- murió, murio, deceso
-- defunción, defuncion, fallecimiento
-- muerte, muerto, finado, fallecido
-- paro cardiorrespiratorio (con o sin "irreversible"), PCR
-- fin de vida (en contexto de fallecimiento)
-- se suspende soporte vital, se certifica defunción
-- retiro de soporte vital, limitación del esfuerzo terapéutico
-- **constata, se constata** (común en: "se constata óbito")
-- **maniobras de reanimación** (indica intento de RCP)
-
-**Ejemplo CORRECTO:**
-```
-Paciente de 79 años, sexo masculino, con antecedentes de HTA, DLP, FA...
-Durante la internación se realizan estudios complementarios...
-Evoluciona con deterioro progresivo del sensorio y falla multiorgánica.
-El paciente presenta paro cardiorrespiratorio que no responde a maniobras
-de reanimación. Se constata óbito.
-
----
-**DESENLACE: ÓBITO**
-Fecha: 26/01/2026 | Hora: 14:30
----
-```
-
-**Ejemplo INCORRECTO (NO HACER):**
-```
-Paciente de 79 años... PACIENTE OBITÓ - Fecha: 26/01/2026 Hora: hora no
-registrada. Durante la internación se realizan estudios...
-```
-↑ ¡ERROR! ÓBITO está mezclado con el texto de evolución, no al final.
-
----
-
-### 📋 SECCIÓN: PROCEDIMIENTOS REALIZADOS
-
-**DEFINICIÓN:**
-> **PROCEDIMIENTO (EPC)**: Toda intervención diagnóstica o terapéutica efectivamente realizada al paciente durante el episodio asistencial, que implique una acción clínica identificable, con fecha/hora aproximada, responsable/servicio, y resultado inmediato o incidencia.
-> Incluye procedimientos invasivos y no invasivos, quirúrgicos, endoscópicos, intervencionistas, y maniobras terapéuticas relevantes.
-
----
-
-#### ✅ QUÉ INCLUIR (Ejemplos obligatorios):
-
-| Categoría | Ejemplos |
-|-----------|----------|
-| **Quirúrgicos** | Cirugía mayor/menor, toilette, sutura, drenaje, desbridamiento |
-| **Intervencionistas** | Cateterismo, angioplastia, colocación de stent, biopsia guiada |
-| **Endoscópicos** | **VEDA** (Videoendoscopía Digestiva Alta), colonoscopía, broncoscopía, CPRE |
-| **Dispositivos/Accesos** | Vía central, PICC, sonda vesical, SNG, intubación (IOT), traqueostomía |
-| **Terapéuticos** | Transfusión, diálisis, ventilación mecánica, cardioversión, RCP |
-| **Diagnósticos relevantes** | Punción lumbar, artrocentesis, toracocentesis, paracentesis |
-
----
-
-#### ❌ QUÉ NO ES PROCEDIMIENTO (NO incluir):
-
-| NO incluir | Va en... |
-|------------|----------|
-| Medicaciones (ATB, analgesia, etc.) | **Plan Terapéutico / Farmacológica** |
-| Laboratorio rutinario | **Estudios Complementarios** |
-| Rx simple (sin intervención) | **Estudios Complementarios** |
-| Conductas generales ("observación", "control evolutivo") | **Evolución** |
-| Diagnósticos | **Diagnóstico de ingreso/egreso** |
-
----
-
-#### 📋 REGLAS OBLIGATORIAS:
-
-1. ✅ **Listar SOLO lo realizado** (no lo indicado ni lo planificado)
-2. ✅ **Cada procedimiento DEBE incluir**:
-   - Nombre estándar (si usa sigla, aclararla: ej. "VEDA (Videoendoscopía Digestiva Alta)")
-   - Fecha y hora
-   - Servicio/área (quirófano, UTI, guardia, hemodinamia, endoscopía)
-   - Motivo (breve)
-   - Hallazgos/resultado
-   - Complicaciones (si hubo)
-3. ✅ **Ordenar cronológicamente** (fecha más antigua primero)
-4. ❌ **Si NO hubo procedimientos**: Escribir exactamente:
-   ```
-   No se registran procedimientos invasivos/intervencionistas durante la internación.
-   ```
-
----
-
-#### 📌 FORMATO OBLIGATORIO:
-
-```
-DD/MM/YYYY HH:MM - [Servicio] Nombre del procedimiento
-  • Motivo: ...
-  • Hallazgos: ...
-  • Complicaciones: ninguna / descripción
-```
-
-**Ejemplo CORRECTO:**
-```
-15/01/2026 10:30 - [Endoscopía] VEDA (Videoendoscopía Digestiva Alta)
-  • Motivo: Hemorragia digestiva alta
-  • Hallazgos: Úlcera gástrica Forrest IIb, se realiza esclerosis
-  • Complicaciones: ninguna
-
-16/01/2026 14:00 - [UTI] Intubación orotraqueal (IOT)
-  • Motivo: Insuficiencia respiratoria aguda
-  • Hallazgos: Vía aérea difícil, se logra al segundo intento
-  • Complicaciones: ninguna
+HCE (MongoDB) → [Capa 1: Filtrado] → [Capa 2: Prompt LLM] → [Capa 3: Post-proceso] → EPC
+                                                                                        ↓
+                                                                              [Capa 4: PDF Export]
 ```
 
 ---
 
-**⚠️ REGLA DE AGRUPACIÓN DE LABORATORIOS:**
-Si hay múltiples estudios de laboratorio en la MISMA FECHA SIN HORA, se agrupan en una sola línea:
-```
-DD/MM/YYYY (hora no registrada) - 🔬 Laboratorio (5 estudios)
-```
+## 🏗️ Capa 1 — Filtrado de HCE
+
+**Archivo:** `app/services/hce_json_parser.py`  
+**Propósito:** Filtrar y estructurar los datos de la HCE ANTES de enviarlos a la IA.
+
+### Regla 1.1 — Evolución = SOLO Evolución Médica
+
+| Campo | Detalle |
+|-------|---------|
+| **Prioridad** | ⛔ CRÍTICA |
+| **Descripción** | La sección "Evolución" de la EPC se construye EXCLUSIVAMENTE con registros de tipo médico |
+| **Tipos válidos** | `EVOLUCION MEDICA (A CARGO)`, `INGRESO DE PACIENTE`, `PARTE QUIRURGICO`, `PARTE PROCEDIMIENTO` |
+| **Tipos descartados** | `HOJA DE ENFERMERIA`, `CONTROL DE ENFERMERIA`, `BALANCE HIDROELECTROLITICO`, `EVOLUCION DE INTERCONSULTA`, `INDICACION` |
+| **Justificación** | Evita que notas de enfermería (signos vitales, cambios de pañal, etc.) contaminen la evolución médica |
+
+### Regla 1.2 — Motivo de internación ≤ 10 palabras
+
+| Campo | Detalle |
+|-------|---------|
+| **Prioridad** | ⛔ CRÍTICA |
+| **Descripción** | El motivo de internación se trunca automáticamente a máximo 10 palabras |
+| **Formato** | Resumen lógico, sin fechas, sin nombres de paciente |
+| **Ejemplo correcto** | "Fractura de cadera derecha por caída" |
+| **Ejemplo incorrecto** | "Paciente de 85 años que ingresa por caída de propia altura con fractura de cadera derecha el día 15/03" |
+
+### Regla 1.3 — Motivo nunca vacío
+
+| Campo | Detalle |
+|-------|---------|
+| **Prioridad** | ⛔ CRÍTICA |
+| **Descripción** | Si todas las fuentes principales están vacías, se usa la primera oración de la primera evolución médica como fallback |
+| **Orden de búsqueda** | 1) `entrMotivoConsulta` → 2) Plantilla ANAMNESIS → 3) Plantilla EPICRISIS → 4) Primera evolución médica → 5) `"No especificado en HCE"` |
 
 ---
 
-### 📋 SECCIÓN: INTERCONSULTAS
+## 🤖 Capa 2 — System Prompt (Instrucciones al LLM)
+
+**Archivo:** `app/services/ai_langchain_service.py` → `_get_epc_system_prompt()`  
+**Propósito:** Instruir al LLM sobre formato, estilo y reglas obligatorias.
+
+### Regla 2.1 — No inventar datos
+
+> SOLO usa información presente en el texto de la HCE. NO inventes datos.  
+> Si una sección no tiene información, deja el campo vacío o como lista vacía.
+
+### Regla 2.2 — Motivo máximo 10 palabras
+
+El LLM recibe instrucción explícita:
+- Máximo 10 palabras, sin excepciones
+- Resumen lógico perfecto extraído de la evolución médica
+- No copiar textos largos, no incluir fechas ni nombres
+- Si no hay información clara → `"No especificado en HCE"`
+
+### Regla 2.3 — Evolución solo de fuente médica
+
+El LLM recibe instrucción explícita:
+- Usar EXCLUSIVAMENTE la sección "EVOLUCIÓN MÉDICA"
+- Descartar notas de enfermería, controles, balances
+- Descartar evoluciones de interconsulta (van en sección aparte)
+- Estilo médico técnico, como pase entre colegas
+
+### Regla 2.4 — Detección de Fallecimiento / OBITO
+
+| Condición | Acción |
+|-----------|--------|
+| Se detecta fallecimiento en la HCE | Último párrafo de evolución **DEBE** comenzar con: `PACIENTE OBITÓ - Fecha: [fecha] Hora: [hora]. [descripción]` |
+| Paciente falleció | `indicaciones_alta` = `[]` (vacías) |
+| Paciente falleció | `recomendaciones` = `[]` (vacías) |
 
 **Formato obligatorio:**
 ```
-DD/MM/YYYY HH:MM - Especialidad
+PACIENTE OBITÓ - Fecha: 15/03/2025 Hora: 14:30. Evolucionó con shock séptico refractario a vasopresores.
 ```
 
-**Si no hay hora:**
-```
-DD/MM/YYYY (hora no registrada) - Especialidad
-```
+### Regla 2.5 — Procedimientos con fecha
 
-**Reglas:**
-- ✅ SIEMPRE incluir fecha
-- ✅ Ordenar cronológicamente (fecha más antigua primero)
-- ✅ Eliminar duplicados exactos
-- ❌ NUNCA escribir sin fecha
+- Formato: `DD/MM/YYYY HH:MM - Descripción` (o `DD/MM/YYYY (hora no registrada) - Descripción`)
+- **Nunca** sin fecha
+- Eliminar duplicados exactos
+- Ordenar cronológicamente
+- Incluir: laboratorios, imágenes, procedimientos invasivos
 
-**⚠️ REGLA DE AGRUPACIÓN POR ESPECIALIDAD:**
-Las interconsultas se agrupan por especialidad, mostrando **SOLO la PRIMERA fecha/hora** de cada especialidad.
+### Regla 2.6 — Interconsultas con fecha
 
-**Ejemplo:**
-Si hay 3 interconsultas a Infectología:
-- 13/01/2026 10:00 - Infectología
-- 14/01/2026 14:00 - Infectología  
-- 15/01/2026 09:00 - Infectología
+- Formato: `DD/MM/YYYY HH:MM - Especialidad`
+- Sin duplicados (misma fecha + misma especialidad)
+- Ordenar cronológicamente
 
-El resultado agrupado es:
-```
-13/01/2026 10:00 - Infectología
-```
-(Solo aparece la primera fecha, las demás se omiten)
+### Regla 2.7 — Clasificación de medicación
 
-**Especialidades detectadas automáticamente:**
-- Cardiología, Neurología, Nefrología, Cirugía General
-- Traumatología, Hematología, Infectología, Neumonología
-- Kinesiología, Gastroenterología, Endocrinología
-- Urología, Otorrinolaringología, Dermatología
-- Psiquiatría, Psicología, Nutrición, Cuidados Paliativos
-- Clínica Médica (default)
+| Tipo | Descripción | Fuente en HCE |
+|------|-------------|---------------|
+| `previa` | Medicación que el paciente ya tomaba antes de ingresar | "antecedentes", "medicación habitual", "tratamiento crónico" |
+| `internacion` | Medicación indicada durante la hospitalización | "indicaciones médicas", "plan terapéutico", "se inicia", "se indica" |
 
----
-
-### 📋 SECCIÓN: ESTUDIOS COMPLEMENTARIOS (No Laboratoriales)
-
-**DEFINICIÓN:**
-> Todo estudio diagnóstico realizado para obtener información clínica durante el episodio, que **NO sea laboratorio** y que **NO implique un procedimiento invasivo/intervencionista** como acto principal.
-
----
-
-#### ✅ QUÉ INCLUIR:
-
-| Categoría | Ejemplos |
-|-----------|----------|
-| **Imágenes** | Rx, ecografía, Doppler, TAC, RMN, mamografía, densitometría |
-| **Cardiológicos/Funcionales no invasivos** | ECG, Holter, MAPA, prueba ergométrica (PEG), ecocardiograma transtorácico (ETT) |
-| **Neurológicos/Funcionales** | EEG, EMG, potenciales evocados |
-| **Respiratorios** | Espirometría |
-| **Otros no invasivos** | Audiometría, campimetría |
-
----
-
-#### ❌ QUÉ NO INCLUIR (va en otras secciones):
-
-| NO incluir | Va en... |
-|------------|----------|
-| Laboratorio (hemograma, bioquímica, cultivos) | **Laboratorio** |
-| Endoscopías (VEDA, colonoscopía, broncoscopía) | **Procedimientos** |
-| Punciones/Biopsias | **Procedimientos** |
-| Interconsultas con especialistas | **Interconsultas** |
-
----
-
-#### 📋 REGLAS OBLIGATORIAS:
-
-1. ✅ Listar SOLO estudios diagnósticos no laboratoriales realizados
-2. ✅ Excluir: laboratorio, procedimientos invasivos, interconsultas
-3. ✅ Cada estudio debe incluir: **Tipo de estudio** + **Fecha**
-4. ❌ Si NO hubo estudios: "No se registran estudios complementarios no laboratoriales."
-5. ⚠️ Si dato incompleto: "sin informe disponible" (NO inventar resultados)
-
----
-
-#### 📌 FORMATO OBLIGATORIO:
-
-```
-DD/MM/YYYY — Tipo de estudio
-```
-
-**Ejemplo CORRECTO:**
-```
-05/02/2026 — TAC de cráneo sin contraste
-06/02/2026 — Ecocardiograma transtorácico (ETT)
-07/02/2026 — Rx de tórax frente
-```
-
----
-
-### 📋 SECCIÓN: LABORATORIO
-
-**DEFINICIÓN:**
-> Todos los análisis de muestras biológicas realizados durante el episodio (sangre, orina, cultivos, etc.).
-
----
-
-#### ✅ QUÉ INCLUIR:
-
-| Categoría | Ejemplos |
-|-----------|----------|
-| **Hematología** | Hemograma, plaquetas, coagulación, TP, KPTT |
-| **Bioquímica** | Glucemia, urea, creatinina, ionograma, hepatograma |
-| **Marcadores** | PCR, procalcitonina, troponina, BNP |
-| **Microbiología** | Hemocultivos, urocultivo, coprocultivo |
-| **Gases** | Gasometría arterial/venosa |
-
----
-
-#### ❌ QUÉ NO ES LABORATORIO:
-
-| NO incluir | Va en... |
-|------------|----------|
-| Estudios de imágenes (Rx, TAC, Eco) | **Estudios Complementarios** |
-| Estudios funcionales (ECG, EEG) | **Estudios Complementarios** |
-
----
-
-#### 📋 REGLAS:
-
-- ✅ Agrupar por fecha si hay múltiples estudios
-- ✅ Ordenar cronológicamente
-- ❌ Si no hay: "No se registran determinaciones de laboratorio."
-
----
-
-**Formato obligatorio (JSON):**
+Formato JSON obligatorio:
 ```json
-{
-  "tipo": "internacion" | "previa",
-  "farmaco": "Nombre del medicamento",
-  "dosis": "Cantidad",
-  "via": "IV | Oral | SC | IM",
-  "frecuencia": "cada X hs"
-}
+{"tipo": "internacion|previa", "farmaco": "nombre", "dosis": "cantidad", "via": "IV|Oral|SC|IM", "frecuencia": "cada X hs"}
 ```
 
-**Reglas:**
-- ✅ Campo "tipo" es OBLIGATORIO
-- `internacion` = administrada DURANTE la hospitalización
-- `previa` = medicación habitual del paciente ANTES de ingresar (antecedentes, tratamiento crónico)
+---
 
-**⚠️ VERIFICACIÓN AUTOMÁTICA (Post-Procesamiento):**
-El sistema CORRIGE automáticamente clasificación incorrecta basándose en:
+## 🔧 Capa 3 — Post-procesamiento
 
-**Medicamentos típicamente PREVIOS (crónicos orales):**
-- Antihipertensivos: losartan, valsartan, enalapril, amlodipino, bisoprolol
-- Estatinas: atorvastatina, simvastatina, rosuvastatina
-- Diabetes: metformina, glibenclamida
-- Tiroides: levotiroxina
-- IBP: omeprazol, pantoprazol
+**Archivo:** `app/services/ai_langchain_service.py` → `_post_process_epc_result()`  
+**Propósito:** Corregir y validar el output del LLM DESPUÉS de generado.
 
-**Medicamentos típicamente de INTERNACIÓN (agudos IV):**
-- Antibióticos IV: ampicilina/sulbactam, piperacilina/tazobactam, vancomicina
-- Analgésicos: morfina, fentanilo
-- Vasopresores: noradrenalina, dopamina
-- Otros: furosemida IV, amiodarona
+### Regla 3.1 — Detección de fallecimiento con anti-keywords
+
+| Categoría | Keywords | Comportamiento |
+|-----------|----------|----------------|
+| **Alta confianza** | `fallece`, `falleció`, `óbito`, `murió`, `deceso`, `defunción`, `exitus`, `se constata óbito`, `se certifica defunción`, `paciente finado` | Siempre detectan muerte (salvo anti-keyword fuerte cerca) |
+| **Ambiguos** | `maniobras de reanimación`, `paro cardiorrespiratorio irreversible`, `retiro de soporte vital`, `limitación del esfuerzo terapéutico`, `se suspende soporte vital` | Solo detectan si NO hay anti-keyword en 200 caracteres |
+| **Anti-keywords** | `revierte`, `exitosa`, `se recupera`, `estabiliza`, `mejoría`, `alta médica`, `consciente`, `vigil` | Invalidan la detección de muerte |
+| **Anti-keywords fuertes** | `alta médica`, `alta sanatorial`, `se descarta`, `eventualidad`, `riesgo de`, `posibilidad de`, `podría`, `en caso de` | Invalidan incluso keywords de alta confianza |
+
+**Archivo de implementación:** `app/rules/death_detection.py`
+
+### Regla 3.2 — Encabezado OBITO obligatorio
+
+Si se detecta fallecimiento y la evolución no tiene el encabezado, se inyecta automáticamente:
+```
+PACIENTE OBITÓ - Fecha: [fecha] Hora: [hora]. [contexto]
+```
+
+### Regla 3.3 — Eliminar frases contradictorias
+
+Si hay OBITO, se eliminan automáticamente frases como:
+- "se da de alta", "alta médica", "alta sanatorial"
+- "evolución favorable", "buena evolución"
+- "se retira deambulando", "egreso a domicilio"
+- "controles ambulatorios", "seguimiento ambulatorio"
+
+### Regla 3.4 — Interconsultas y procedimientos sin fecha
+
+- Se descartan interconsultas sin fecha
+- Se descartan procedimientos sin fecha
+- Se normalizan fechas `YYYY-MM-DD` → `DD/MM/YYYY`
+
+### Regla 3.5 — Agrupación de hemodiálisis
+
+Múltiples sesiones de hemodiálisis se agrupan en una sola entrada:
+```
+15/01/2025 - Hemodiálisis (8 sesiones del 15/01/2025 al 28/01/2025)
+```
+
+### Regla 3.6 — Reclasificación de medicación
+
+| Si es... | Y está marcado como... | Se corrige a... |
+|----------|----------------------|-----------------|
+| Antihipertensivo oral (losartán, enalapril, etc.) | `internacion` | `previa` |
+| Antibiótico IV (vancomicina, meropenem, etc.) | `previa` | `internacion` |
+
+### Regla 3.7 — Motivo máximo 10 palabras (refuerzo)
+
+Se aplica un truncamiento hard-coded a 10 palabras como safety net, incluso si el LLM generó más.
+
+### Regla 3.8 — Motivo nunca vacío (refuerzo)
+
+Si después de todo el pipeline el motivo está vacío → `"No especificado en HCE"`.
 
 ---
 
-### 📋 SECCIÓN: INDICACIONES AL ALTA
+## 📄 Capa 4 — Exportación PDF
 
-**Reglas:**
-- ✅ Lista de indicaciones para el paciente al alta
-- ❌ Si el paciente FALLECIÓ, esta sección DEBE estar VACÍA `[]`
+**Archivo:** `app/utils/epc_pdf.py` → `_coalesce_sections()`  
+**Propósito:** Controlar qué secciones aparecen en el PDF exportado.
 
----
+### Regla 4.1 — Orden de secciones en PDF
 
-### 📋 SECCIÓN: RECOMENDACIONES
+```
+1. Título
+2. Datos clínicos
+3. Motivo de internación
+4. Evolución
+5. Procedimientos
+6. Interconsultas
+7. Indicaciones de alta
+```
 
-**Reglas Fundamentales:**
-- ✅ Lista de recomendaciones de seguimiento
-- ❌ Si el paciente FALLECIÓ, esta sección DEBE estar VACÍA `[]`
-- ✅ Las recomendaciones deben basarse en la EVOLUCIÓN del paciente
+### Regla 4.2 — Secciones excluidas del PDF
 
----
+Las siguientes secciones **NO** aparecen en el PDF:
 
-#### ✅ REGLAS DE ESTILO MÉDICO:
-
-1. **Redactar con ROL MÉDICO** y léxico profesional
-2. Usar **terminología médica precisa** y formal
-3. Recomendaciones **personalizadas** según la evolución clínica
-
----
-
-#### ⛔ ERRORES COMUNES A EVITAR:
-
-| ❌ INCORRECTO | ✅ CORRECTO | Razón |
-|--------------|-------------|-------|
-| "Consultar si fiebre mayor a 38°C" | "Control precoz ante temperatura ≥38°C o deterioro del estado general" | Fiebre YA es >38°C (redundante) |
-| "Control si presenta fiebre" | "Consulta precoz ante hipertermia o signos de infección" | Impreciso |
-| "Tomar medicación según indicación" | "Cumplir tratamiento antibiótico por 7 días según esquema indicado" | Genérico |
-| "Hacer reposo" | "Reposo relativo con movilización progresiva según tolerancia" | Vago |
-| "Controlar herida" | "Curación de herida quirúrgica cada 48hs con solución fisiológica" | Sin especificar |
+| Excluida | Motivo |
+|----------|--------|
+| Plan Terapéutico | La medicación es información interna, no para el PDF de epicrisis |
+| Tratamiento / Medicación | Ídem |
+| Medicación | Ídem |
+| Notas al Alta | Información interna |
+| Recomendaciones | Información interna |
 
 ---
 
-#### 📋 ESTRUCTURA DE RECOMENDACIONES:
+## 🛡️ Capa 5 — Módulo de Death Detection
 
-1. **Controles clínicos específicos** (qué monitorear y cuándo)
-2. **Signos de alarma claros** (cuándo consultar urgente)
-3. **Seguimiento por especialidades** según interconsultas realizadas
-4. **Indicaciones de actividad física/dieta** si aplica
-5. **Controles de estudios pendientes** si corresponde
+**Archivo:** `app/rules/death_detection.py`  
+**Propósito:** Detección autónoma de fallecimiento con minimización de falsos positivos.
+
+### Funciones exportadas
+
+| Función | Uso |
+|---------|-----|
+| `detect_death_in_text(text)` | Detecta fallecimiento en texto libre. Retorna `DeathInfo` |
+| `detect_death_from_alta_type(tipo_alta)` | Detecta fallecimiento desde el campo `taltDescripcion` del episodio |
+| `format_death_line(date, time, description)` | Genera línea formateada de OBITO |
+
+### Dataclass `DeathInfo`
+
+```python
+@dataclass
+class DeathInfo:
+    detected: bool          # ¿Se detectó fallecimiento?
+    date: Optional[str]     # Fecha extraída (DD/MM/YYYY)
+    time: Optional[str]     # Hora extraída (HH:MM)
+    source_text: Optional[str]      # Fragmento de texto fuente
+    detection_method: Optional[str]  # Método usado (keyword:xxx)
+```
 
 ---
 
----
+## 📝 Historial de Cambios
 
-## ⚠️ Nota Importante sobre Detección de Fallecimiento
-
-El sistema tiene múltiples mecanismos para detectar fallecimiento:
-1. **Detección por IA**: El modelo analiza el texto y debe aplicar la regla automáticamente
-2. **Post-procesamiento**: Un script backend verifica y corrige si la IA falló
-
-Si aún así encuentras casos donde no se aplica correctamente, reporta el caso con:
-- El texto completo de la HCE
-- La palabra o frase exacta que indica fallecimiento
-- El resultado generado
-
----
-
-## Última actualización
-06/02/2026 - v3.0
-- Agregada Tabla de Decisión Rápida (Regla de Oro)
-- Nueva sección: Estudios Complementarios (no laboratoriales)
-- Nueva sección: Laboratorio
-- Actualizado filtrado de procedimientos (endoscopías, ablación)
-- Mejorado léxico médico en Recomendaciones
+| Fecha | Versión | Cambio |
+|-------|---------|--------|
+| 2026-02-27 | 2.0 | Reglas de Oro: filtrado EVOLUCIÓN MÉDICA, motivo 10 palabras, anti-keywords death detection, PDF sin medicación |
+| 2025-12-01 | 1.0 | Versión inicial con reglas de OBITO, procedimientos, interconsultas |

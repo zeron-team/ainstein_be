@@ -581,6 +581,16 @@ async def generate_epc_by_sections(
     # Gemini 2.0 Flash tiene 1M tokens, no hay límite práctico para HCEs típicas
     prompt = PROMPT_MOTIVO_EVOLUCION.format(hce_text=hce_text)
     
+    # 🏆 Inyectar Golden Rules al prompt
+    try:
+        from app.services.golden_rules_service import get_golden_rules_for_prompt
+        golden_rules = await get_golden_rules_for_prompt()
+        if golden_rules:
+            prompt = golden_rules + "\n\n" + prompt
+            print(f"[SectionGenerator] Golden Rules injected: {len(golden_rules)} chars")
+    except Exception as e:
+        print(f"[SectionGenerator] Could not load Golden Rules: {e}")
+    
     try:
         raw_result = await ai.generate_epc(prompt)
         

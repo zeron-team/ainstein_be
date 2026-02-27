@@ -41,6 +41,7 @@ class DeathDetectionRule:
     """
     
     # Palabras clave que indican fallecimiento (orden de prioridad)
+    # SOLO términos directos de alta confianza
     DEATH_KEYWORDS: List[str] = [
         # Términos directos (alta confianza)
         "fallece", "falleció", "fallecio", "falleciendo",
@@ -48,21 +49,39 @@ class DeathDetectionRule:
         "murió", "murio", "deceso",
         "defunción", "defuncion", "fallecimiento",
         "finado", "fallecido",
-        # Términos médicos
-        "paro cardiorrespiratorio irreversible", "pcr irreversible",
+        # Términos médicos directos
         "exitus", "éxitus",
-        # Acciones ESPECÍFICAS que indican muerte (no genéricas)
+        # Acciones ESPECÍFICAS que indican muerte confirmada
         "se constata óbito", "se constata obito",
         "se constata defunción", "se constata defuncion",
         "constata el deceso", "constata el fallecimiento",
+        "se certifica defunción",
+        "paciente finado", "paciente fallecido",
+    ]
+    
+    # Términos ambiguos: solo detectan muerte si NO hay anti-keywords cerca
+    AMBIGUOUS_KEYWORDS: List[str] = [
+        "paro cardiorrespiratorio irreversible", "pcr irreversible",
         "maniobras de reanimación",
         "sin respuesta a maniobras",
         "retiro de soporte vital",
         "limitación del esfuerzo terapéutico",
-        "cuidados de fin de vida",
-        "se certifica defunción",
         "se suspende soporte vital",
-        "paciente finado", "paciente fallecido",
+        "cuidados de fin de vida",
+    ]
+    
+    # Anti-keywords: invalidan detección si aparecen cerca del keyword
+    ANTI_DEATH_KEYWORDS: List[str] = [
+        "revierte", "revirtió", "recupera", "exitosa", "exitosas",
+        "exitoso", "exitosos",
+        "responde a", "responde al tratamiento",
+        "se recupera", "estabiliza", "mejoría", "mejora",
+        "eventualidad", "riesgo de", "posibilidad de",
+        "podría", "si llegara", "en caso de",
+        "se descarta", "se niega",
+        "sin complicaciones", "evolución favorable",
+        "alta médica", "alta sanatorial",
+        "vivo", "consciente", "vigil", "lúcido",
     ]
     
     # Patrones regex para extraer fecha y hora
@@ -81,6 +100,7 @@ class DeathDetectionRule:
     def detect(self, text: str) -> DeathInfo:
         """
         Detecta si hay fallecimiento en el texto.
+        Usa anti-keywords para evitar falsos positivos.
         
         Args:
             text: Texto de evolución o HCE completa
@@ -93,14 +113,45 @@ class DeathDetectionRule:
         
         text_lower = text.lower()
         
-        # Buscar palabras clave
+        # 1. Buscar palabras clave directas (alta confianza)
         detected_keyword = None
         for keyword in self.DEATH_KEYWORDS:
             if keyword in text_lower:
                 detected_keyword = keyword
                 break
         
+        # 2. Si no hubo match directo, verificar ambiguos con anti-keywords
         if not detected_keyword:
+            for keyword in self.AMBIGUOUS_KEYWORDS:
+                if keyword in text_lower:
+                    # Verificar que no haya anti-keywords cerca (200 chars)
+                    idx = text_lower.find(keyword)
+                    ctx_start = max(0, idx - 200)
+                    ctx_end = min(len(text_lower), idx + len(keyword) + 200)
+                    context = text_lower[ctx_start:ctx_end]
+                    
+                    has_anti = any(anti in context for anti in self.ANTI_DEATH_KEYWORDS)
+                    if has_anti:
+                        log.info(f"[DeathRule] Keyword ambiguo '{keyword}' invalidado por anti-keyword")
+                        continue
+                    
+                    detected_keyword = keyword
+                    break
+        
+        if not detected_keyword:
+            return DeathInfo(detected=False)
+        
+        # 3. Verificación adicional: anti-keywords fuertes invalidan incluso keywords directos
+        idx = text_lower.find(detected_keyword)
+        ctx_start = max(0, idx - 200)
+        ctx_end = min(len(text_lower), idx + len(detected_keyword) + 200)
+        context = text_lower[ctx_start:ctx_end]
+        
+        strong_anti = ["alta médica", "alta sanatorial", "se descarta",
+                      "eventualidad", "riesgo de", "posibilidad de",
+                      "podría", "en caso de"]
+        if any(anti in context for anti in strong_anti):
+            log.info(f"[DeathRule] Keyword '{detected_keyword}' invalidado por contexto negador")
             return DeathInfo(detected=False)
         
         # Extraer fecha y hora

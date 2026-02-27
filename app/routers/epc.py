@@ -1235,6 +1235,18 @@ async def generate_epc(
         indicaciones_alta = data.get("indicaciones_alta", []) or []
         notas_alta = data.get("notas_alta", []) or []
         
+        # FALLBACK: Si interconsultas está vacío pero interconsultas_detalle tiene datos, usar eso
+        if not interconsultas:
+            ic_detalle = data.get("interconsultas_detalle", []) or []
+            if ic_detalle:
+                interconsultas = ic_detalle
+                log.info(f"[generate_epc] Interconsultas vacías, usando interconsultas_detalle: {len(interconsultas)} items")
+        
+        # DEBUG: Log what generate_epc_from_json returned
+        log.info(f"[generate_epc] DEBUG data keys: {list(data.keys())}")
+        log.info(f"[generate_epc] DEBUG interconsultas from data: {len(interconsultas)} items: {interconsultas[:5]}")
+        log.info(f"[generate_epc] DEBUG interconsultas_detalle from data: {len(data.get('interconsultas_detalle', []))} items")
+        
         # ⚠️ POST-PROCESAMIENTO: Detectar óbito desde tipo_alta del episodio
         try:
             from app.services.epc_pre_validator import EPCPreValidator
@@ -1335,6 +1347,38 @@ HCE: \"\"\"{hce_text[:12000]}\"\"\""""
         "recomendaciones": notas_alta,  # Compatibilidad con frontend existente
         "data": data,
     }
+
+    # ------------------------------------------------------------------
+    # 3.5) FALLBACK: Si motivo está vacío, inferir con LLM desde evolución
+    # ------------------------------------------------------------------
+    _motivo = generated_doc.get("motivo_internacion", "").strip()
+    print(f"[FALLBACK] motivo='{_motivo}' evolucion_len={len(evolucion or '')}")
+    if not _motivo or _motivo.lower() in ("no especificado en hce", "no especificado"):
+        _evo_text = (evolucion or "")[:4000]
+        if _evo_text and len(_evo_text) > 50:
+            try:
+                print("[FALLBACK] Motivo vacío, intentando inferir con LLM...")
+                _ai = GeminiAIService()
+                _prompt = (
+                    "Eres un médico clínico experto. A partir del siguiente texto de evolución clínica, "
+                    "determina cuál fue el MOTIVO DE INTERNACIÓN del paciente. "
+                    "Responde ÚNICAMENTE el motivo, en lenguaje médico profesional, "
+                    "máximo 30 palabras. NO incluyas la edad, sexo ni fecha de ingreso. "
+                    "Sé conciso y preciso. Responde SOLO el texto del motivo, sin comillas ni explicaciones.\n\n"
+                    f"Evolución clínica:\n{_evo_text}"
+                )
+                _ai_result = await _ai.generate_epc(_prompt, want_json=False)
+                _ai_motivo = (_ai_result.get("raw_text", "") if isinstance(_ai_result, dict) else str(_ai_result)).strip().strip('"').strip("'").strip()
+                # Limitar a 30 palabras
+                _words = _ai_motivo.split()
+                if len(_words) > 30:
+                    _ai_motivo = " ".join(_words[:30])
+                if _ai_motivo and len(_ai_motivo) > 5:
+                    generated_doc["motivo_internacion"] = f"No especificado en HCE ({_ai_motivo})"
+                    motivo = generated_doc["motivo_internacion"]
+                    print(f"[FALLBACK] Motivo inferido por LLM: {motivo[:100]}")
+            except Exception as e:
+                print(f"[FALLBACK] Error al inferir motivo con LLM: {e}")
 
     # ------------------------------------------------------------------
     # 4) Persistir en Mongo y sincronizar estados SQL
