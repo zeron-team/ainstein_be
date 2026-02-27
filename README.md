@@ -366,6 +366,7 @@ ainstein_be/
 │   │   ├── 📄 snomed.py             # 🆕 /snomed (SNOMED CT integration)
 │   │   ├── 📄 stats.py              # /stats (KPIs)
 │   │   ├── 📄 config.py             # /config (branding)
+│   │   ├── 📄 golden_rules.py       # 🆕 /admin/golden-rules (Golden Rules CRUD + process)
 │   │   ├── 📄 ingest.py             # /ingest (carga datos)
 │   │   ├── 📁 _deprecated/          # Routers deprecados
 │   │   │   ├── 📄 debug.py
@@ -398,6 +399,7 @@ ainstein_be/
 │   │   ├── 📄 feedback_insights_service.py # Análisis de feedback
 │   │   ├── 📄 feedback_llm_analyzer.py     # LLM análisis de feedback
 │   │   ├── 📄 llm_usage_tracker.py         # Tracking costos LLM
+│   │   ├── 📄 golden_rules_service.py      # 🆕 Golden Rules → LLM prompt injection
 │   │   │
 │   │   │   # ─── RAG & Vectors ───
 │   │   ├── 📄 rag_service.py              # RAG principal
@@ -723,6 +725,17 @@ flowchart LR
 | GET | `/snomed/estudios` | Listar estudios SNOMED CT |
 | GET | `/snomed/procedimientos` | Listar procedimientos SNOMED CT |
 
+### Golden Rules (Reglas de Oro)
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/admin/golden-rules` | Listar todas las secciones con reglas |
+| PUT | `/admin/golden-rules/{section}` | Actualizar reglas de una sección |
+| POST | `/admin/golden-rules/{section}/add` | Agregar regla a una sección |
+| POST | `/admin/golden-rules/{section}/process` | Procesar reglas pendientes |
+
+> **Flujo de procesamiento**: Las reglas editadas/nuevas quedan como "Pendiente". Solo las reglas **procesadas** se inyectan en el prompt del LLM para la generación de EPC.
+
 ---
 
 ## 🏢 Multi-Tenancy
@@ -913,4 +926,4 @@ Propiedad de **Zeron Team** - Todos los derechos reservados.
 
 ---
 
-*Última actualización: 2026-02-25 | FERRO D2 v3.0.0*
+*Última actualización: 2026-02-27 | FERRO D2 v3.0.0*
