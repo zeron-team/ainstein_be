@@ -2263,13 +2263,21 @@ async def submit_section_feedback(
         "created_by": str(getattr(user, "id", None)) if user else None,
         "created_by_name": _actor_name(user),
         "created_at": _now(),
+        "status": "draft",  # draft hasta que se complete la evaluación
     }
+
+    # Eliminar feedback anterior de la misma sección (draft o completed) del mismo usuario
+    await mongo.epc_feedback.delete_many({
+        "epc_id": epc_id,
+        "section": body.section,
+        "created_by": str(getattr(user, "id", None)),
+    })
 
     # Insertar en colección epc_feedback
     await mongo.epc_feedback.insert_one(feedback_doc)
 
     log.info(
-        "[submit_section_feedback] epc_id=%s section=%s rating=%s by=%s",
+        "[submit_section_feedback] epc_id=%s section=%s rating=%s status=draft by=%s",
         epc_id,
         body.section,
         body.rating,
@@ -2277,6 +2285,46 @@ async def submit_section_feedback(
     )
 
     return {"ok": True, "message": "Feedback registrado correctamente"}
+
+
+# -----------------------------------------------------------------------------
+# Completar evaluación: marcar todos los feedbacks draft como completed
+# -----------------------------------------------------------------------------
+@router.post("/{epc_id}/feedback/complete")
+async def complete_evaluation(
+    epc_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Marca todos los feedbacks 'draft' del usuario actual para esta EPC
+    como 'completed'. Solo se llama cuando el usuario hace click en
+    'Guardar Evaluación' habiendo evaluado todas las secciones.
+    """
+    user_id = str(getattr(user, "id", None)) if user else None
+    if not user_id:
+        raise HTTPException(status_code=401, detail="No autenticado")
+
+    result = await mongo.epc_feedback.update_many(
+        {
+            "epc_id": epc_id,
+            "created_by": user_id,
+            "status": "draft",
+        },
+        {"$set": {"status": "completed", "completed_at": _now()}}
+    )
+
+    log.info(
+        "[complete_evaluation] epc_id=%s marked=%d completed by=%s",
+        epc_id,
+        result.modified_count,
+        _actor_name(user),
+    )
+
+    return {
+        "ok": True,
+        "completed_count": result.modified_count,
+        "message": f"Evaluación completada: {result.modified_count} secciones marcadas.",
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -2305,7 +2353,7 @@ async def get_my_feedback(
             "evaluated_at": None,
         }
     
-    # Buscar feedbacks del usuario para esta EPC
+    # Buscar feedbacks del usuario para esta EPC (solo completed, o draft si no hay completed)
     cursor = mongo.epc_feedback.find({
         "epc_id": epc_id,
         "created_by": user_id,
@@ -2357,12 +2405,14 @@ async def get_feedback_stats(
     """
     # Total por rating
     totals_cursor = mongo.epc_feedback.aggregate([
+        {"$match": {"status": {"$in": ["completed", None]}}},
         {"$group": {"_id": "$rating", "count": {"$sum": 1}}}
     ])
     totals = await totals_cursor.to_list(None)
 
     # Por sección y rating
     by_section_cursor = mongo.epc_feedback.aggregate([
+        {"$match": {"status": {"$in": ["completed", None]}}},
         {"$group": {
             "_id": {"section": "$section", "rating": "$rating"},
             "count": {"$sum": 1}
@@ -2373,7 +2423,7 @@ async def get_feedback_stats(
 
     # Feedbacks recientes con texto (para mostrar en tabla)
     recent_cursor = mongo.epc_feedback.find(
-        {"feedback_text": {"$ne": None, "$exists": True}},
+        {"feedback_text": {"$ne": None, "$exists": True}, "status": {"$in": ["completed", None]}},
         sort=[("created_at", -1)],
         limit=30
     )
@@ -2412,7 +2462,7 @@ async def get_feedback_stats(
     # Generar insights automáticos mejorados
     # Primero obtener datos de preguntas para cada sección
     questions_for_insights_cursor = mongo.epc_feedback.aggregate([
-        {"$match": {"rating": {"$in": ["partial", "bad"]}}},
+        {"$match": {"rating": {"$in": ["partial", "bad"]}, "status": {"$in": ["completed", None]}}},
         {"$group": {
             "_id": "$section",
             "has_omissions_true": {"$sum": {"$cond": [{"$eq": ["$has_omissions", True]}, 1, 0]}},
@@ -2476,7 +2526,7 @@ async def get_feedback_stats(
 
     # Estadísticas de las 3 preguntas obligatorias
     questions_cursor = mongo.epc_feedback.aggregate([
-        {"$match": {"rating": {"$in": ["partial", "bad"]}}},
+        {"$match": {"rating": {"$in": ["partial", "bad"]}, "status": {"$in": ["completed", None]}}},
         {"$group": {
             "_id": "$section",
             "has_omissions_true": {"$sum": {"$cond": [{"$eq": ["$has_omissions", True]}, 1, 0]}},
@@ -2514,7 +2564,7 @@ async def get_feedback_stats(
     
     # Semana actual (últimos 7 días)
     current_week_cursor = mongo.epc_feedback.aggregate([
-        {"$match": {"created_at": {"$gte": one_week_ago}}},
+        {"$match": {"created_at": {"$gte": one_week_ago}, "status": {"$in": ["completed", None]}}},
         {"$group": {
             "_id": "$section",
             "ok": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}},
@@ -2527,7 +2577,7 @@ async def get_feedback_stats(
     
     # Semana anterior (7-14 días atrás)
     prev_week_cursor = mongo.epc_feedback.aggregate([
-        {"$match": {"created_at": {"$gte": two_weeks_ago, "$lt": one_week_ago}}},
+        {"$match": {"created_at": {"$gte": two_weeks_ago, "$lt": one_week_ago}, "status": {"$in": ["completed", None]}}},
         {"$group": {
             "_id": "$section",
             "ok": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}},
@@ -2747,8 +2797,8 @@ async def get_feedback_grouped(
     # Máximo de secciones por sesión de evaluación
     MAX_SECTIONS_PER_SESSION = 7
     
-    # Obtener todos los feedbacks ordenados por fecha (más recientes primero)
-    cursor = mongo.epc_feedback.find({}).sort("created_at", -1)
+    # Obtener todos los feedbacks completados (o legacy sin status)
+    cursor = mongo.epc_feedback.find({"status": {"$in": ["completed", None]}}).sort("created_at", -1)
     all_feedbacks = await cursor.to_list(500)  # Limitar a 500 feedbacks
     
     if not all_feedbacks:
@@ -2936,10 +2986,12 @@ async def get_epc_dashboard_control(
 
     # Total EPCs
     total_epcs = await mongo.epc_docs.count_documents({})
-    total_feedbacks = await mongo.epc_feedback.count_documents({})
+    total_feedbacks = await mongo.epc_feedback.count_documents({"status": {"$in": ["completed", None]}})
 
     # --- Por usuario ---
+    COMPLETED_FILTER = {"$match": {"status": {"$in": ["completed", None]}}}
     user_pipeline = [
+        COMPLETED_FILTER,
         {
             "$group": {
                 "_id": "$created_by_name",
@@ -3006,6 +3058,7 @@ async def get_epc_dashboard_control(
 
     # Tasa aprobación global
     ok_total_pipe = [
+        {"$match": {"status": {"$in": ["completed", None]}}},
         {"$group": {"_id": None, "ok": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}}, "total": {"$sum": 1}}}
     ]
     approval = 0
@@ -3015,7 +3068,7 @@ async def get_epc_dashboard_control(
 
     # --- Últimas evaluaciones ---
     recent = []
-    recent_cursor = mongo.epc_feedback.find().sort("created_at", -1).limit(100)
+    recent_cursor = mongo.epc_feedback.find({"status": {"$in": ["completed", None]}}).sort("created_at", -1).limit(100)
     async for doc in recent_cursor:
         epc_id = doc.get("epc_id")
         patient_name = None
@@ -3041,6 +3094,7 @@ async def get_epc_dashboard_control(
 
     # --- Evaluaciones por Paciente/EPC ---
     epc_pipeline = [
+        {"$match": {"status": {"$in": ["completed", None]}}},
         {
             "$group": {
                 "_id": "$epc_id",
@@ -3091,6 +3145,60 @@ async def get_epc_dashboard_control(
             "last_evaluation": doc["last_evaluation"].isoformat() if doc.get("last_evaluation") else None,
         })
 
+    # --- Evaluaciones por Paciente/EPC desglosadas por evaluador ---
+    epc_evaluator_pipeline = [
+        {"$match": {"status": {"$in": ["completed", None]}}},
+        {
+            "$group": {
+                "_id": {"epc_id": "$epc_id", "evaluator": "$created_by_name"},
+                "evaluator_id": {"$first": "$created_by"},
+                "total_evaluations": {"$sum": 1},
+                "ok_count": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}},
+                "partial_count": {"$sum": {"$cond": [{"$eq": ["$rating", "partial"]}, 1, 0]}},
+                "bad_count": {"$sum": {"$cond": [{"$eq": ["$rating", "bad"]}, 1, 0]}},
+                "first_evaluation": {"$min": "$created_at"},
+                "last_evaluation": {"$max": "$created_at"},
+            }
+        },
+        {"$sort": {"last_evaluation": -1}},
+    ]
+
+    by_epc_evaluator = []
+    async for doc in mongo.epc_feedback.aggregate(epc_evaluator_pipeline):
+        epc_id = doc["_id"]["epc_id"]
+        evaluator_name = doc["_id"]["evaluator"] or "—"
+        total = doc["total_evaluations"]
+        ok = doc["ok_count"]
+        ok_pct = round((ok / total) * 100, 1) if total > 0 else 0
+
+        # Buscar nombre de paciente y fecha de creación de EPC
+        patient_name = None
+        epc_created = None
+        if epc_id:
+            epc_doc = await mongo.epc_docs.find_one(
+                {"_id": epc_id},
+                {"patient_id": 1, "created_at": 1}
+            )
+            if epc_doc:
+                pid = str(epc_doc.get("patient_id", ""))
+                patient_name = patient_name_map.get(pid)
+                epc_created = epc_doc.get("created_at")
+
+        by_epc_evaluator.append({
+            "epc_id": epc_id,
+            "patient_name": patient_name or epc_id[:12] + "..." if epc_id else "—",
+            "evaluator_name": evaluator_name,
+            "evaluator_id": doc.get("evaluator_id"),
+            "total_evaluations": total,
+            "ok_count": ok,
+            "partial_count": doc["partial_count"],
+            "bad_count": doc["bad_count"],
+            "ok_pct": ok_pct,
+            "epc_created": epc_created.isoformat() if epc_created else None,
+            "first_evaluation": doc["first_evaluation"].isoformat() if doc.get("first_evaluation") else None,
+            "last_evaluation": doc["last_evaluation"].isoformat() if doc.get("last_evaluation") else None,
+        })
+
     return {
         "kpis": {
             "total_epcs": total_epcs,
@@ -3102,6 +3210,7 @@ async def get_epc_dashboard_control(
         },
         "by_user": by_user,
         "by_epc": by_epc,
+        "by_epc_evaluator": by_epc_evaluator,
         "recent_evaluations": recent,
     }
 

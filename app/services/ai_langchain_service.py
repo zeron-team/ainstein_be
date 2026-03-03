@@ -67,15 +67,177 @@ except ImportError:
     RULES_AVAILABLE = False
     log.warning("[PostProcess] Rules module not available, using fallback")
 
-def _post_process_epc_result(result: Dict[str, Any]) -> Dict[str, Any]:
+
+# ============================================================================
+# Section Dictionary Rules — Enforcement from learned corrections
+# ============================================================================
+
+async def _load_section_dictionary() -> List[Dict[str, Any]]:
+    """Loads all rules from section_mapping_dictionary collection."""
+    try:
+        from app.adapters.mongo_client import get_mongo_db
+        mongo = get_mongo_db()
+        cursor = mongo.section_mapping_dictionary.find().sort("frequency", -1).limit(200)
+        rules = []
+        async for doc in cursor:
+            rules.append({
+                "item_pattern": doc.get("item_pattern", ""),
+                "target_section": doc.get("target_section", ""),
+                "frequency": doc.get("frequency", 1),
+            })
+        if rules:
+            log.info("[DictionaryRules] Loaded %d section mapping rules", len(rules))
+        return rules
+    except Exception as e:
+        log.warning("[DictionaryRules] Error loading rules: %s", e)
+        return []
+
+
+def _strip_accents(text: str) -> str:
+    """Remove accents/diacritics for comparison purposes."""
+    import unicodedata
+    nfkd = unicodedata.normalize('NFKD', text)
+    return ''.join(c for c in nfkd if not unicodedata.category(c).startswith('M'))
+
+
+def _normalize_for_matching(text: str) -> str:
+    """Normalize text for dictionary matching: strip date/time prefix, accents, uppercase."""
+    # Strip date+time prefix: "DD/MM/YYYY HH:MM - " or "DD/MM/YYYY (hora no registrada) - "
+    normalized = re.sub(
+        r'^\d{1,2}/\d{1,2}/\d{2,4}\s*(?:\d{1,2}:\d{2})?\s*(?:\(hora no registrada\))?\s*[-–]?\s*',
+        '', text
+    ).strip()
+    # Remove accents and uppercase
+    return _strip_accents(normalized).upper()
+
+
+def _apply_dictionary_rules(result: Dict[str, Any], dictionary_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Post-procesa el resultado aplicando las reglas del diccionario de secciones.
+    Mueve items que están en la sección incorrecta a la sección correcta.
+    
+    REGLA DE ORO: Si un item matchea una regla del diccionario, se mueve
+    a la sección target SIN EXCEPCIONES.
+    """
+    if not dictionary_rules:
+        return result
+    
+    # Sections that contain list items to check
+    LIST_SECTIONS = ["procedimientos", "interconsultas", "indicaciones_alta", "recomendaciones"]
+    
+    moves = []  # Track moves for logging
+    
+    for rule in dictionary_rules:
+        # Normalize pattern: strip accents, strip parenthetical dates, uppercase
+        raw_pattern = rule["item_pattern"].strip()
+        # Remove trailing date in parens: "PSICOLOGICA - CONSULTA (13/04/2022)" -> "PSICOLOGICA - CONSULTA"
+        pattern = re.sub(r'\s*\(\d{1,2}/\d{1,2}/\d{2,4}\)\s*$', '', raw_pattern).strip()
+        pattern_normalized = _strip_accents(pattern).upper()
+        target = rule["target_section"]
+        
+        if not pattern_normalized or not target:
+            continue
+        
+        # Check each list section for items matching this rule
+        for section_name in LIST_SECTIONS:
+            if section_name == target:
+                continue  # Already in correct section
+            
+            items = result.get(section_name, [])
+            if not isinstance(items, list):
+                continue
+            
+            items_to_remove = []
+            items_to_add = []
+            
+            for item in items:
+                if not isinstance(item, str):
+                    continue
+                
+                # Normalize item for comparison
+                item_normalized = _normalize_for_matching(item)
+                
+                # Match: pattern is contained in the normalized item
+                if pattern_normalized in item_normalized:
+                    items_to_remove.append(item)
+                    items_to_add.append(item)
+                    moves.append({
+                        "item": item[:80],
+                        "from": section_name,
+                        "to": target,
+                        "pattern": pattern_normalized,
+                    })
+            
+            if items_to_remove:
+                # Remove from wrong section
+                result[section_name] = [i for i in items if i not in items_to_remove]
+                
+                # Add to correct section
+                target_items = result.get(target, [])
+                if not isinstance(target_items, list):
+                    target_items = []
+                # Avoid duplicates
+                for add_item in items_to_add:
+                    if add_item not in target_items:
+                        target_items.append(add_item)
+                result[target] = target_items
+    
+    if moves:
+        for m in moves:
+            log.info(
+                "[DictionaryRules] MOVED: '%s' FROM %s TO %s (pattern: %s)",
+                m["item"], m["from"], m["to"], m["pattern"]
+            )
+        log.info("[DictionaryRules] Applied %d item moves from dictionary rules", len(moves))
+    
+    return result
+
+
+async def get_section_dictionary_for_prompt() -> str:
+    """Format section dictionary rules for injection into the LLM prompt."""
+    rules = await _load_section_dictionary()
+    if not rules:
+        return ""
+    
+    lines = []
+    for r in rules:
+        pattern = r["item_pattern"]
+        target = r["target_section"]
+        freq = r["frequency"]
+        section_display = {
+            "procedimientos": "PROCEDIMIENTOS",
+            "interconsultas": "INTERCONSULTAS",
+            "indicaciones_alta": "INDICACIONES AL ALTA",
+            "recomendaciones": "RECOMENDACIONES",
+            "medicacion": "MEDICACIÓN",
+        }.get(target, target.upper())
+        lines.append(f'  ⛔ "{pattern}" → SIEMPRE va en {section_display} (frecuencia: {freq})')
+    
+    header = """
+
+################################################################################
+#   📖 DICCIONARIO DE CLASIFICACIÓN APRENDIDO                                 #
+#   Estas reglas son ABSOLUTAS - Si un item coincide con un patrón,           #
+#   DEBE ir en la sección indicada. NO hay excepciones.                       #
+################################################################################
+"""
+    return header + "\n".join(lines) + "\n"
+
+
+def _post_process_epc_result(result: Dict[str, Any], dictionary_rules: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """
     Post-procesa el resultado de la IA para ASEGURAR que se cumplan las reglas.
     Esta función corrige automáticamente problemas comunes que la IA puede generar.
     
     Usa el módulo centralizado de reglas (app/rules/) cuando está disponible.
+    También aplica las reglas del diccionario de secciones aprendido.
     """
     if not isinstance(result, dict):
         return result
+    
+    # PRIMERO: Aplicar reglas del diccionario de secciones (REGLA DE ORO)
+    if dictionary_rules:
+        result = _apply_dictionary_rules(result, dictionary_rules)
     
     evolucion = result.get("evolucion", "")
     evolucion_lower = evolucion.lower()
@@ -594,6 +756,17 @@ class LangChainAIService:
         except Exception as e:
             log.warning("[LangChainAI] Could not load Golden Rules: %s", e)
         
+        # 📖 Agregar Diccionario de Clasificación Aprendido al prompt
+        dictionary_rules = []
+        try:
+            dictionary_rules = await _load_section_dictionary()
+            dict_prompt = await get_section_dictionary_for_prompt()
+            if dict_prompt:
+                system_prompt = system_prompt + dict_prompt
+                log.info("[LangChainAI] Section Dictionary injected: %d rules, %d chars", len(dictionary_rules), len(dict_prompt))
+        except Exception as e:
+            log.warning("[LangChainAI] Could not load Section Dictionary: %s", e)
+        
         # Few-shot examples si hay feedback disponible
         examples_text = ""
         if feedback_examples:
@@ -637,8 +810,9 @@ class LangChainAIService:
                 log.warning("[LangChainAI] Failed to track usage: %s", track_err)
             
             # ⚠️ POST-PROCESAMIENTO OBLIGATORIO: Asegurar cumplimiento de reglas
-            result = _post_process_epc_result(result)
-            log.info("[LangChainAI] Post-procesamiento de reglas aplicado")
+            # Incluye reglas del diccionario de secciones aprendido
+            result = _post_process_epc_result(result, dictionary_rules=dictionary_rules)
+            log.info("[LangChainAI] Post-procesamiento de reglas aplicado (dict_rules=%d)", len(dictionary_rules))
             
             return {
                 "json": result,

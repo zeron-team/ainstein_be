@@ -115,6 +115,7 @@ class FeedbackInsightsService:
     async def _get_section_stats(self) -> Dict[str, Dict[str, int]]:
         """Obtiene estadísticas de feedback por sección."""
         pipeline = [
+            {"$match": {"status": {"$in": ["completed", None]}}},
             {
                 "$group": {
                     "_id": {"section": "$section", "rating": "$rating"},
@@ -143,7 +144,8 @@ class FeedbackInsightsService:
         cursor = mongo.epc_feedback.find(
             {
                 "rating": {"$in": ["bad", "partial"]},
-                "feedback_text": {"$ne": None, "$exists": True}
+                "feedback_text": {"$ne": None, "$exists": True},
+                "status": {"$in": ["completed", None]},
             },
             sort=[("created_at", -1)],
             limit=limit
@@ -159,8 +161,8 @@ class FeedbackInsightsService:
             Dict con formato: {section: {omissions: N, repetitions: N, confusing: N}}
         """
         pipeline = [
-            # Solo feedbacks negativos (donde se responden las 3 preguntas)
-            {"$match": {"rating": {"$in": ["bad", "partial"]}}},
+            # Solo feedbacks negativos completados
+            {"$match": {"rating": {"$in": ["bad", "partial"]}, "status": {"$in": ["completed", None]}}},
             {
                 "$group": {
                     "_id": "$section",
