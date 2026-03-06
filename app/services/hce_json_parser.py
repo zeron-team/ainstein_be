@@ -1524,9 +1524,10 @@ Responde SOLO con JSON válido:
     # 8. ⚠️ POST-PROCESAMIENTO CRÍTICO: Aplicar regla de óbito como respaldo
     # Si el LLM no aplicó la regla, la aplicamos aquí
     try:
-        from app.services.ai_langchain_service import _post_process_epc_result
-        result = _post_process_epc_result(result)
-        log.info("[EPC-JSON] Applied death rule post-processing")
+        from app.services.ai_langchain_service import _post_process_epc_result, _load_section_dictionary
+        dictionary_rules = await _load_section_dictionary()
+        result = _post_process_epc_result(result, dictionary_rules=dictionary_rules)
+        log.info("[EPC-JSON] Applied death rule post-processing (%d dictionary rules)", len(dictionary_rules))
     except Exception as e:
         log.warning(f"[EPC-JSON] Could not apply post-processing: {e}")
     

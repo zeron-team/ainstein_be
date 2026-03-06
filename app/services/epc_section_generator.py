@@ -663,8 +663,9 @@ async def generate_epc_by_sections(
              f"medicacion_previa={len(medications_dict['previa'])}")
     
     # 7. ⚠️ POST-PROCESAMIENTO OBLIGATORIO: Aplicar reglas críticas (incluida regla de óbito)
-    from app.services.ai_langchain_service import _post_process_epc_result
-    result = _post_process_epc_result(result)
-    log.info("[SectionGenerator] Post-procesamiento de reglas aplicado (incluida regla de óbito)")
+    from app.services.ai_langchain_service import _post_process_epc_result, _load_section_dictionary
+    dictionary_rules = await _load_section_dictionary()
+    result = _post_process_epc_result(result, dictionary_rules=dictionary_rules)
+    log.info("[SectionGenerator] Post-procesamiento de reglas aplicado (incluida regla de óbito, %d dictionary rules)", len(dictionary_rules))
     
     return result

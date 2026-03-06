@@ -187,6 +187,7 @@ async def get_all_rules(user=Depends(get_current_user)):
         "medicacion": "Medicación",
         "indicaciones_alta": "Indicaciones alta",
         "recomendaciones": "Recomendaciones",
+        "EXCLUDE": "🚫 Excluir de TODAS las secciones",
     }
     
     try:
@@ -198,10 +199,17 @@ async def get_all_rules(user=Depends(get_current_user)):
             freq = doc.get("frequency", 1)
             target_label = SECTION_LABELS.get(target, target)
             
+            if target == "EXCLUDE":
+                text = f"🚫 '{item}' → Excluir de TODAS las secciones (aprendido de {freq} corrección{'es' if freq > 1 else ''})"
+                priority = "critica"
+            else:
+                text = f"'{item}' → {target_label} (aprendido de {freq} corrección{'es' if freq > 1 else ''})"
+                priority = "alta" if freq >= 3 else "normal"
+            
             rule = {
                 "id": f"dict_{doc.get('_id', '')}",
-                "text": f"'{item}' → {target_label} (aprendido de {freq} corrección{'es' if freq > 1 else ''})",
-                "priority": "alta" if freq >= 3 else "normal",
+                "text": text,
+                "priority": priority,
                 "active": True,
                 "source": "dictionary",
                 "item_pattern": item,

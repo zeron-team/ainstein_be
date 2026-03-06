@@ -93,6 +93,38 @@ async def _load_section_dictionary() -> List[Dict[str, Any]]:
         return []
 
 
+def _spanish_stem(word: str) -> str:
+    """
+    Simple Spanish stemmer for medical/procedure terms.
+    Strips common suffixes to find the root word for fuzzy matching.
+    E.g.: NEBULIZACIONES → NEBULIZ, NEBULIZACION → NEBULIZ, NEBULIZABLE → NEBULIZ
+    """
+    w = word.upper().strip()
+    # Order matters: longest/most-specific suffixes MUST come first
+    suffixes = [
+        "IZACIONES", "IZACION",          # nebulIZACIONES, nebulIZACION → nebul
+        "ACIONES", "ICIONES",            # operACIONES → oper
+        "AMIENTO", "IMIENTO",
+        "IZABLES", "IZABLE",             # nebulIZABLE → nebul
+        "ABLES", "IBLES",
+        "IONES", "ACION", "ICION",       # nebulizACION
+        "ANTES", "ENTES", "ANTE", "ENTE",
+        "ISTAS", "ISTA",
+        "ARES", "ORES", "URAS",
+        "ADOS", "IDOS", "ADO", "IDO",
+        "ANDO", "IENDO",
+        "CION", "SION",
+        "ABLE", "IBLE",
+        "MENTE",
+        "IZAR",
+        "ES", "AS",
+    ]
+    for suffix in suffixes:
+        if w.endswith(suffix) and len(w) - len(suffix) >= 4:
+            return w[:-len(suffix)]
+    return w
+
+
 def _strip_accents(text: str) -> str:
     """Remove accents/diacritics for comparison purposes."""
     import unicodedata
@@ -110,14 +142,54 @@ def _normalize_for_matching(text: str) -> str:
     # Remove accents and uppercase
     return _strip_accents(normalized).upper()
 
+def _smart_match_exclude(pattern_normalized: str, item_normalized: str) -> bool:
+    """
+    Smart matching for EXCLUDE rules. Returns True if the pattern matches the item.
+    
+    Uses three strategies:
+    1. Exact substring match (original behavior)
+    2. Stem-based match: stems of pattern words found in item text
+    3. Word-boundary match: any word in the item starts with the pattern stem
+    """
+    # 1. Exact substring match
+    if pattern_normalized in item_normalized:
+        return True
+    
+    # 2. Stem-based matching
+    # Get stems for all significant words in the pattern (≥4 chars)
+    pattern_words = [w for w in pattern_normalized.split() if len(w) >= 4]
+    if not pattern_words:
+        return False
+    
+    item_words = [w for w in item_normalized.split() if len(w) >= 4]
+    
+    for p_word in pattern_words:
+        p_stem = _spanish_stem(p_word)
+        if len(p_stem) < 4:
+            continue
+        
+        # Check if any item word shares the same stem or starts with the pattern stem
+        for i_word in item_words:
+            i_stem = _spanish_stem(i_word)
+            if p_stem == i_stem:
+                return True
+            # Also check prefix match (NEBULIZ in NEBULIZABLE)
+            if i_word.startswith(p_stem) or p_word.startswith(i_stem):
+                return True
+    
+    return False
+
 
 def _apply_dictionary_rules(result: Dict[str, Any], dictionary_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Post-procesa el resultado aplicando las reglas del diccionario de secciones.
     Mueve items que están en la sección incorrecta a la sección correcta.
+    Excluye items con target_section="EXCLUDE" de TODAS las secciones.
     
     REGLA DE ORO: Si un item matchea una regla del diccionario, se mueve
-    a la sección target SIN EXCEPCIONES.
+    a la sección target SIN EXCEPCIONES. Si target es EXCLUDE, se elimina.
+    
+    EXCLUDE rules use SMART matching (stem-based) to catch synonyms and variations.
     """
     if not dictionary_rules:
         return result
@@ -126,19 +198,44 @@ def _apply_dictionary_rules(result: Dict[str, Any], dictionary_rules: List[Dict[
     LIST_SECTIONS = ["procedimientos", "interconsultas", "indicaciones_alta", "recomendaciones"]
     
     moves = []  # Track moves for logging
+    exclusions = []  # Track exclusions for logging
     
     for rule in dictionary_rules:
         # Normalize pattern: strip accents, strip parenthetical dates, uppercase
         raw_pattern = rule["item_pattern"].strip()
         # Remove trailing date in parens: "PSICOLOGICA - CONSULTA (13/04/2022)" -> "PSICOLOGICA - CONSULTA"
         pattern = re.sub(r'\s*\(\d{1,2}/\d{1,2}/\d{2,4}\)\s*$', '', raw_pattern).strip()
+        # Also strip grouped dates: "NEBULIZACIONES (02/02/2026, 03/03/2026)" -> "NEBULIZACIONES"
+        pattern = re.sub(r'\s*\([^)]*\)\s*$', '', pattern).strip()
         pattern_normalized = _strip_accents(pattern).upper()
         target = rule["target_section"]
         
         if not pattern_normalized or not target:
             continue
         
-        # Check each list section for items matching this rule
+        # EXCLUDE rules: remove matching items from ALL sections using SMART matching
+        if target == "EXCLUDE":
+            for section_name in LIST_SECTIONS:
+                items = result.get(section_name, [])
+                if not isinstance(items, list):
+                    continue
+                
+                original_len = len(items)
+                filtered = [
+                    i for i in items
+                    if not (isinstance(i, str) and _smart_match_exclude(pattern_normalized, _normalize_for_matching(i)))
+                ]
+                removed_count = original_len - len(filtered)
+                if removed_count > 0:
+                    result[section_name] = filtered
+                    exclusions.append({
+                        "pattern": pattern_normalized,
+                        "section": section_name,
+                        "removed": removed_count,
+                    })
+            continue
+        
+        # MOVE rules: move items from wrong section to correct section
         for section_name in LIST_SECTIONS:
             if section_name == target:
                 continue  # Already in correct section
@@ -182,6 +279,15 @@ def _apply_dictionary_rules(result: Dict[str, Any], dictionary_rules: List[Dict[
                         target_items.append(add_item)
                 result[target] = target_items
     
+    if exclusions:
+        for e in exclusions:
+            log.info(
+                "[DictionaryRules] EXCLUDED %d items matching '%s' from %s",
+                e["removed"], e["pattern"], e["section"]
+            )
+        total_excluded = sum(e["removed"] for e in exclusions)
+        log.info("[DictionaryRules] Applied %d exclusions from dictionary rules", total_excluded)
+    
     if moves:
         for m in moves:
             log.info(
@@ -204,14 +310,17 @@ async def get_section_dictionary_for_prompt() -> str:
         pattern = r["item_pattern"]
         target = r["target_section"]
         freq = r["frequency"]
-        section_display = {
-            "procedimientos": "PROCEDIMIENTOS",
-            "interconsultas": "INTERCONSULTAS",
-            "indicaciones_alta": "INDICACIONES AL ALTA",
-            "recomendaciones": "RECOMENDACIONES",
-            "medicacion": "MEDICACIÓN",
-        }.get(target, target.upper())
-        lines.append(f'  ⛔ "{pattern}" → SIEMPRE va en {section_display} (frecuencia: {freq})')
+        if target == "EXCLUDE":
+            lines.append(f'  🚫 "{pattern}" → EXCLUIR de TODAS las secciones. NO incluir NUNCA. (frecuencia: {freq})')
+        else:
+            section_display = {
+                "procedimientos": "PROCEDIMIENTOS",
+                "interconsultas": "INTERCONSULTAS",
+                "indicaciones_alta": "INDICACIONES AL ALTA",
+                "recomendaciones": "RECOMENDACIONES",
+                "medicacion": "MEDICACIÓN",
+            }.get(target, target.upper())
+            lines.append(f'  ⛔ "{pattern}" → SIEMPRE va en {section_display} (frecuencia: {freq})')
     
     header = """
 

@@ -38,3 +38,9 @@ check_feedback.py
 debug_env.py
 import_*.py
 test_feedback_submission.py
+
+# Database dumps (too large for GitHub)
+dump_*/
+dumps_*/
+*.sql
+backend.log

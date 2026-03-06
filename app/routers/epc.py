@@ -2127,6 +2127,47 @@ async def approve_section_correction(
                     "created_at": datetime.utcnow(),
                     "updated_at": datetime.utcnow(),
                 })
+        
+        elif action == "remove" and item_text:
+            # EXCLUSION: Create rule with target_section="EXCLUDE" to filter
+            # this item from ALL future EPC generations
+            item_normalized = re.sub(r'^\d{1,2}/\d{1,2}/\d{2,4}\s*[-–]?\s*', '', item_text).strip().upper()
+            # Strip grouped dates: "NEBULIZACIONES (02/02/2026, 03/03/2026)" → "NEBULIZACIONES"
+            item_normalized = re.sub(r'\s*\([^)]*\)\s*$', '', item_normalized).strip()
+            
+            if item_normalized:
+                existing = await mongo.section_mapping_dictionary.find_one(
+                    {"item_pattern": item_normalized}
+                )
+                
+                if existing:
+                    await mongo.section_mapping_dictionary.update_one(
+                        {"_id": existing["_id"]},
+                        {
+                            "$set": {
+                                "target_section": "EXCLUDE",
+                                "updated_at": datetime.utcnow(),
+                            },
+                            "$inc": {"frequency": 1},
+                            "$addToSet": {"source_corrections": correction_id},
+                        }
+                    )
+                else:
+                    await mongo.section_mapping_dictionary.insert_one({
+                        "item_pattern": item_normalized,
+                        "target_section": "EXCLUDE",
+                        "source_corrections": [correction_id],
+                        "frequency": 1,
+                        "created_at": datetime.utcnow(),
+                        "updated_at": datetime.utcnow(),
+                    })
+                
+                log.info(
+                    "[section-dictionary] EXCLUDE rule %s: '%s' (freq=%d)",
+                    "updated" if existing else "created",
+                    item_normalized,
+                    (existing.get("frequency", 0) + 1) if existing else 1,
+                )
     
     # Si se revoca (volver a pending), deshacer la regla del diccionario
     if body.status == "pending":
