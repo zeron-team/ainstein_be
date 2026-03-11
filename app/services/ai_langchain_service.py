@@ -195,7 +195,7 @@ def _apply_dictionary_rules(result: Dict[str, Any], dictionary_rules: List[Dict[
         return result
     
     # Sections that contain list items to check
-    LIST_SECTIONS = ["procedimientos", "interconsultas", "indicaciones_alta", "recomendaciones"]
+    LIST_SECTIONS = ["estudios", "procedimientos", "interconsultas", "indicaciones_alta", "recomendaciones"]
     
     moves = []  # Track moves for logging
     exclusions = []  # Track exclusions for logging

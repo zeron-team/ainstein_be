@@ -25,6 +25,76 @@ _KEEP_UPPER = {
 }
 _LOWERCASE_WORDS = {"de", "del", "con", "por", "para", "en", "el", "la", "al", "los", "las", "un", "una", "y", "o", "e"}
 
+# =============================================================================
+# GLOBAL LAB / BLOOD TEST KEYWORDS  —  These should NEVER appear in "Estudios"
+# =============================================================================
+_LAB_KEYWORDS_GLOBAL = [
+    # Hematología
+    "HEMOGRAMA", "HEMATOCRITO", "HEMOGLOBINA", "LEUCOCITOS", "PLAQUETAS",
+    "RETICULOCITOS", "FROTIS", "MORFOLOGIA", "RECUENTO",
+    # Bioquímica / Metabolismo
+    "GLUCEMIA", "GLUCOSA", "CREATININA", "UREMIA", "UREA", "IONOGRAMA",
+    "HEPATOGRAMA", "CALCEMIA", "MAGNESIO EN SANGRE", "MAGNESIO",
+    "FOSFATEMIA", "FOSFORO", "FÓSFORO", "POTASIO", "SODIO", "CLORO",
+    "BICARBONATO", "CALCIO IONICO", "CALCIO IÓNICO", "CALCIO", "LITIO",
+    "COLESTEROL", "TRIGLICERIDOS", "TRIGLICÉRIDOS", "HDL", "LDL", "VLDL",
+    "URICEMIA", "ACIDO URICO", "ÁCIDO ÚRICO",
+    "BILIRRUBINA", "PROTEINAS TOTALES", "PROTEÍNAS TOTALES",
+    "ALBUMINA", "ALBÚMINA", "GLOBULINAS", "PREALBUMINA",
+    "AMILASA", "LIPASA", "LDH", "CPK", "CK-MB", "TROPONINA",
+    "TRANSAMINASAS", "GOT", "GPT", "TGO", "TGP", "ALT", "AST",
+    "FOSFATASA ALCALINA", "FOSFATASA", "GGT", "GAMMA GT",
+    # Gases / Ácido-base
+    "ACIDO BASE", "ÁCIDO BASE", "GASOMETRIA", "GASOMETRÍA",
+    "EQUILIBRIO ACIDO BASE", "EAB", "PH ARTERIAL",
+    "LACTICO", "LÁCTICO", "LACTATO",
+    # Coagulación
+    "COAGULOGRAMA", "TIEMPO DE PROTROMBINA", "TP", "KPTT", "TPPA",
+    "DIMERO D", "DÍMERO D", "FIBRINOGENO", "FIBRINÓGENO",
+    "RIN", "INR", "ANTI XA",
+    # Inflamación / Marcadores
+    "PCR ULTRASENSIBLE", "VSG", "ERITROSEDIMENTACION", "ERITROSEDIMENTACIÓN",
+    "FERRITINA", "TRANSFERRINA", "PROCALCITONINA",
+    # Hormonas / Endocrinología
+    "TSH", "T3", "T4", "CORTISOL", "INSULINA", "HORMONA", "HORMONAS",
+    "PTH", "PARATOHORMONA", "PROLACTINA", "TESTOSTERONA",
+    # Serología / Microbiología
+    "HEMOCULTIVO", "HEMOCULTIVOS", "UROCULTIVO", "COPROCULTIVO",
+    "CULTIVO", "HISOPADO", "ANTIBIOGRAMA",
+    "TEST RAPIDO", "TEST RÁPIDO", "ANTIGENO", "ANTÍGENO",
+    "SARS-COV", "SARS COV", "COVID", "INFLUENZA",
+    "HIV", "VIH", "HCV", "HBV", "HEPATITIS", "VDRL", "FTA-ABS",
+    "MONOTEST", "PAUL BUNNEL",
+    # Vitaminas / Minerales
+    "VITAMINA", "VIT B12", "VIT D", "ACIDO FOLICO", "ÁCIDO FÓLICO",
+    "HIERRO SERICO", "HIERRO SÉRICO", "TIBC",
+    # Función renal / Orina
+    "ORINA COMPLETA", "SEDIMENTO URINARIO", "PROTEINURIA",
+    "CLEARANCE", "CREATININURIA", "MICROALBUMINURIA",
+    # Función hepática adicional
+    "HEPATOGRAMA", "PERFIL HEPATICO", "PERFIL HEPÁTICO",
+    # Marcadores tumorales
+    "PSA", "CEA", "CA 19-9", "CA 125", "ALFA FETO",
+    # Otros análisis de sangre
+    "GRUPO Y FACTOR", "GRUPO SANGUINEO", "GRUPO SANGUÍNEO",
+    "COOMBS", "PRUEBA CRUZADA", "TIPIFICACION",
+    "LABORATORIO",
+    # Palabras genéricas que indican lab
+    "DOSAJE", "DETERMINACION DE", "DETERMINACIÓN DE",
+    "EN SANGRE", "EN SUERO", "EN PLASMA", "SERICO", "SÉRICO",
+]
+
+
+def _is_lab_item(text: str) -> bool:
+    """Returns True if the text corresponds to a lab/blood test, NOT a diagnostic study."""
+    if not text:
+        return False
+    t = text.upper().strip()
+    # Remove parenthetical dates for cleaner matching
+    t = re.sub(r'\s*\([^)]*\)\s*$', '', t).strip()
+    return any(kw in t for kw in _LAB_KEYWORDS_GLOBAL)
+
+
 
 def _medical_title_case(text: str) -> str:
     """
@@ -1075,8 +1145,11 @@ def extract_studies_chronologically(
         except:
             return datetime.max
     
-    # Filtrar solo estudios
-    studies = [p for p in procedures if is_study(p.get("descripcion", ""))]
+    # Filtrar solo estudios — excluir laboratorios explícitamente
+    studies = [
+        p for p in procedures
+        if is_study(p.get("descripcion", "")) and not _is_lab_item(p.get("descripcion", ""))
+    ]
     
     # Ordenar cronológicamente (para que el primero de cada tipo sea el más antiguo)
     studies.sort(key=parse_date)
@@ -1564,6 +1637,9 @@ INSTRUCCIONES:
 2. NO inventes datos
 3. Si una sección no tiene info, déjala como []
 4. NO incluir fechas, solo descripciones
+5. Para "estudios": SOLO incluir estudios DIAGNÓSTICOS POR IMÁGENES o FUNCIONALES:
+   - ✅ Incluir: TC, RX, Ecografía, Doppler, RMN, ECG, Ecocardiograma, EEG, PET-CT, Centellograma, Espirometría
+   - ❌ NO incluir análisis de sangre/laboratorio: hemograma, glucemia, creatinina, uremia, ionograma, hepatograma, coagulograma, gasometría, PCR, VSG, eritrosedimentación, hemocultivos, urocultivos, tests rápidos, antígenos, cultivos
 
 Responde SOLO con JSON válido:
 {{
@@ -1581,8 +1657,10 @@ Responde SOLO con JSON válido:
                 
                 if fb_data:
                     if not sorted_studies and fb_data.get("estudios"):
-                        result["estudios"] = [s for s in fb_data["estudios"] if isinstance(s, str)]
-                        log.info(f"[EPC-JSON] AI fallback: {len(result['estudios'])} estudios")
+                        # Filter out lab/blood tests from AI-generated estudios
+                        ai_estudios = [s for s in fb_data["estudios"] if isinstance(s, str) and not _is_lab_item(s)]
+                        result["estudios"] = ai_estudios
+                        log.info(f"[EPC-JSON] AI fallback: {len(ai_estudios)} estudios (after lab filter)")
                     if not interconsultas_formatted and fb_data.get("interconsultas"):
                         result["interconsultas"] = [ic for ic in fb_data["interconsultas"] if isinstance(ic, str)]
                         result["interconsultas_detalle"] = result["interconsultas"]
