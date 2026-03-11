@@ -441,12 +441,20 @@ async def get_hce_readable(hce_id: str):
                     motivo = html_mod.unescape(motivo)
                     motivo = re.sub(r"\s+", " ", motivo).strip()
                 
-                if evolucion or motivo:
+                plan = entry.get("entrPlan", "")
+                if plan:
+                    plan = re.sub(r"<[^>]+>", " ", plan)
+                    plan = html_mod.unescape(plan)
+                    plan = re.sub(r"\s+", " ", plan).strip()
+                
+                if evolucion or motivo or plan:
                     lines.append(f"\n  [{fecha_fmt}]")
                     if motivo:
-                        lines.append(f"  Motivo: {motivo[:500]}")
+                        lines.append(f"  Motivo: {motivo}")
                     if evolucion:
-                        lines.append(f"  {evolucion[:2000]}")
+                        lines.append(f"  {evolucion}")
+                    if plan:
+                        lines.append(f"  Plan: {plan}")
                 
                 # Plantillas
                 plantillas = entry.get("plantillas", []) or []
@@ -460,7 +468,13 @@ async def get_hce_readable(hce_id: str):
                             valor = html_mod.unescape(valor)
                             valor = re.sub(r"\s+", " ", valor).strip()
                             if valor:
-                                lines.append(f"  [{grupo}] {nombre}: {valor[:500]}")
+                                lines.append(f"  [{grupo}] {nombre}: {valor}")
+                        # Opciones dentro de la propiedad
+                        opciones = prop.get("opciones", []) or []
+                        for opc in opciones:
+                            opc_desc = opc.get("grpoDescripcion", "")
+                            if opc_desc:
+                                lines.append(f"  [{grupo}] {nombre}: {opc_desc}")
                 
                 # Diagnósticos
                 diagnosticos = entry.get("diagnosticos", []) or []
@@ -468,6 +482,81 @@ async def get_hce_readable(hce_id: str):
                     diags = [d.get("diagDescripcion", "") for d in diagnosticos if d.get("diagDescripcion")]
                     if diags:
                         lines.append(f"  Diagnósticos: {', '.join(diags)}")
+                
+                # Indicaciones farmacológicas
+                farmacos = entry.get("indicacionFarmacologica", []) or []
+                if farmacos and isinstance(farmacos, list):
+                    for med in farmacos:
+                        if not isinstance(med, dict):
+                            continue
+                        nombre_med = (med.get("geneDescripcion") or "").strip()
+                        if not nombre_med:
+                            continue
+                        dosis = (med.get("enmeDosis") or "")
+                        unidad = (med.get("tumeDescripcion") or "")
+                        via = (med.get("meviDescripcion") or "").strip()
+                        freq = (med.get("mefrDescripcion") or "").strip()
+                        dosis_str = f"{dosis} {unidad}".strip() if dosis else ""
+                        parts = [f"Medicación: {nombre_med}"]
+                        if dosis_str:
+                            parts.append(f"Dosis: {dosis_str}")
+                        if via:
+                            parts.append(f"Vía: {via}")
+                        if freq:
+                            parts.append(f"Frec: {freq}")
+                        lines.append(f"  💊 {' | '.join(parts)}")
+                        
+                        # Aplicaciones del fármaco
+                        apps = med.get("aplicaciones", []) or []
+                        for app in apps:
+                            if not isinstance(app, dict):
+                                continue
+                            app_fecha = app.get("panoFechaAtencion", "")
+                            app_desc = (app.get("nomeDescripcion") or "").strip()
+                            if app_fecha:
+                                try:
+                                    dt = datetime.fromisoformat(str(app_fecha).replace("Z", "+00:00"))
+                                    app_fecha = dt.strftime("%d/%m/%Y %H:%M")
+                                except:
+                                    pass
+                            if app_desc or app_fecha:
+                                lines.append(f"    → [{app_fecha}] {app_desc}")
+                
+                # Indicaciones de enfermería
+                enfermeria = entry.get("indicacionEnfermeria", []) or []
+                if enfermeria and isinstance(enfermeria, list):
+                    for enf in enfermeria:
+                        if not isinstance(enf, dict):
+                            continue
+                        desc_enf = (enf.get("indiDescripcion") or "").strip()
+                        obs_enf = (enf.get("eninObservacion") or "").strip()
+                        if obs_enf:
+                            obs_enf = re.sub(r"<[^>]+>", " ", obs_enf)
+                            obs_enf = html_mod.unescape(obs_enf)
+                            obs_enf = re.sub(r"\s+", " ", obs_enf).strip()
+                        if desc_enf:
+                            line = f"  🏥 Enfermería: {desc_enf}"
+                            if obs_enf:
+                                line += f" — {obs_enf}"
+                            lines.append(line)
+                
+                # Procedimientos / estudios
+                procedimientos = entry.get("indicacionProcedimientos", []) or []
+                if procedimientos and isinstance(procedimientos, list):
+                    for proc in procedimientos:
+                        if not isinstance(proc, dict):
+                            continue
+                        desc_proc = (proc.get("procDescripcion") or "").strip()
+                        obs_proc = (proc.get("enprObservacion") or "").strip()
+                        if obs_proc:
+                            obs_proc = re.sub(r"<[^>]+>", " ", obs_proc)
+                            obs_proc = html_mod.unescape(obs_proc)
+                            obs_proc = re.sub(r"\s+", " ", obs_proc).strip()
+                        if desc_proc:
+                            line = f"  🔬 Procedimiento: {desc_proc}"
+                            if obs_proc:
+                                line += f" — {obs_proc}"
+                            lines.append(line)
             
             lines.append("")
         
