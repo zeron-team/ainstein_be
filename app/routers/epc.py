@@ -1862,6 +1862,10 @@ async def submit_section_corrections(
     aprende que ese tipo de item debería clasificarse como procedimiento.
     """
 
+    actor_name = _actor_name(current_user) if hasattr(current_user, "full_name") else (
+        current_user.get("full_name") or current_user.get("username") or current_user.get("sub") or "sistema"
+    ) if isinstance(current_user, dict) else _actor_name(current_user)
+
     for correction in body.corrections:
         doc = {
             "epc_id": epc_id,
@@ -1870,6 +1874,7 @@ async def submit_section_corrections(
             "to_section": correction.to_section,
             "action": correction.action,
             "user_id": current_user.get("sub") or current_user.get("id"),
+            "user_name": actor_name,
             "created_at": datetime.utcnow(),
             "approval_status": "pending",
             "approved_by": None,
@@ -1959,6 +1964,7 @@ async def get_all_section_corrections(
             "to_section": doc.get("to_section"),
             "action": action,
             "user_id": doc.get("user_id"),
+            "user_name": doc.get("user_name"),  # may be None for old docs
             "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
             "approval_status": doc.get("approval_status", "pending"),
             "approved_by": doc.get("approved_by"),
@@ -1994,10 +2000,31 @@ async def get_all_section_corrections(
             pass
     
     # 3. Agregar patient_id y patient_name a cada corrección
+    # 4. Resolver user_name para correcciones antiguas sin nombre almacenado
+    user_ids_to_resolve = set()
     for c in corrections:
         pid = epc_patient_map.get(c["epc_id"])
         c["patient_id"] = pid
         c["patient_name"] = patient_name_map.get(pid) if pid else None
+        if not c.get("user_name") and c.get("user_id"):
+            user_ids_to_resolve.add(c["user_id"])
+    
+    # Lookup user names from PostgreSQL
+    user_name_map: dict = {}
+    if user_ids_to_resolve:
+        try:
+            from app.models import User
+            users = db.query(User.id, User.full_name, User.username).filter(
+                User.id.in_(list(user_ids_to_resolve))
+            ).all()
+            for u in users:
+                user_name_map[str(u.id)] = u.full_name or u.username or str(u.id)
+        except Exception:
+            pass
+    
+    for c in corrections:
+        if not c.get("user_name") and c.get("user_id"):
+            c["user_name"] = user_name_map.get(c["user_id"])
     
     return {
         "summary": summary,
