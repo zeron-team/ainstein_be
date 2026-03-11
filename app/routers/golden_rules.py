@@ -192,24 +192,40 @@ async def get_all_rules(user=Depends(get_current_user)):
     
     try:
         dict_cursor = mongo.section_mapping_dictionary.find().sort("frequency", -1).limit(200)
-        dict_rules = []
+        
+        # ── Deduplicate dictionary rules by (item_pattern, target_section) ──
+        seen: dict = {}   # key = (item_upper, target) → aggregated rule
         async for doc in dict_cursor:
             item = doc.get("item_pattern", "")
             target = doc.get("target_section", "")
             freq = doc.get("frequency", 1)
+            key = (item.upper().strip(), target)
+            
+            if key in seen:
+                # Merge into existing rule
+                existing = seen[key]
+                existing["frequency"] += freq
+                existing["audit_log"].extend(doc.get("audit_log", []))
+                if doc.get("created_by") and doc["created_by"] not in existing["_contributors"]:
+                    existing["_contributors"].add(doc["created_by"])
+                # Keep earliest created_at
+                if doc.get("created_at") and (not existing.get("created_at") or str(doc["created_at"]) < existing["created_at"]):
+                    existing["created_at"] = str(doc["created_at"])
+                # Keep latest updated_at
+                if doc.get("updated_at") and (not existing.get("updated_at") or str(doc["updated_at"]) > existing["updated_at"]):
+                    existing["updated_at"] = str(doc["updated_at"])
+                # Preserve processed state
+                if doc.get("processed"):
+                    existing["processed"] = True
+                    existing["processed_at"] = doc.get("processed_at")
+                    existing["processed_by"] = doc.get("processed_by")
+                continue
+            
             target_label = SECTION_LABELS.get(target, target)
             
-            if target == "EXCLUDE":
-                text = f"🚫 '{item}' → Excluir de TODAS las secciones (aprendido de {freq} corrección{'es' if freq > 1 else ''})"
-                priority = "critica"
-            else:
-                text = f"'{item}' → {target_label} (aprendido de {freq} corrección{'es' if freq > 1 else ''})"
-                priority = "alta" if freq >= 3 else "normal"
-            
-            rule = {
+            seen[key] = {
                 "id": f"dict_{doc.get('_id', '')}",
-                "text": text,
-                "priority": priority,
+                "priority": "critica" if target == "EXCLUDE" else ("alta" if freq >= 3 else "normal"),
                 "active": True,
                 "source": "dictionary",
                 "item_pattern": item,
@@ -219,20 +235,52 @@ async def get_all_rules(user=Depends(get_current_user)):
                 "created_at": str(doc.get("created_at", "")) if doc.get("created_at") else None,
                 "updated_at": str(doc.get("updated_at", "")) if doc.get("updated_at") else None,
                 "audit_log": doc.get("audit_log", []),
+                "_contributors": {doc.get("created_by", "sistema")},
+                "_target_label": target_label,
             }
-            # Preserve processed state from dictionary
             if doc.get("processed"):
-                rule["processed"] = True
-                rule["processed_at"] = doc.get("processed_at")
-                rule["processed_by"] = doc.get("processed_by")
+                seen[key]["processed"] = True
+                seen[key]["processed_at"] = doc.get("processed_at")
+                seen[key]["processed_by"] = doc.get("processed_by")
+        
+        # Build final dict_rules with text and contributors
+        dict_rules = []
+        for rule in seen.values():
+            freq = rule["frequency"]
+            target = rule["target_section"]
+            item = rule["item_pattern"]
+            target_label = rule.pop("_target_label")
+            contributors = sorted(rule.pop("_contributors"))
             
+            if target == "EXCLUDE":
+                text = f"🚫 '{item}' → Excluir de TODAS las secciones (aprendido de {freq} corrección{'es' if freq > 1 else ''})"
+            else:
+                text = f"'{item}' → {target_label} (aprendido de {freq} corrección{'es' if freq > 1 else ''})"
+            
+            rule["text"] = text
+            rule["priority"] = "critica" if target == "EXCLUDE" else ("alta" if freq >= 3 else "normal")
+            rule["contributors"] = contributors
             dict_rules.append(rule)
         
-        # Find or create learned section and append dict rules
+        # Sort by frequency descending
+        dict_rules.sort(key=lambda r: r["frequency"], reverse=True)
+        
+        # ── Merge into 'learned' section, removing manual duplicates ──
+        # Build a set of known patterns for quick lookup
+        dict_patterns = {r["item_pattern"].upper().strip() for r in dict_rules}
+        
         learned = next((s for s in sections if s["key"] == "learned"), None)
         if learned:
-            # Keep manually added rules, append dict rules
-            manual_rules = [r for r in learned["rules"] if r.get("source") != "dictionary"]
+            # Keep only manual rules that are NOT already in the dictionary
+            manual_rules = []
+            for r in learned["rules"]:
+                if r.get("source") == "dictionary":
+                    continue  # Skip old dict rules from previous loads
+                # Check if this manual rule's text matches any dict pattern
+                rule_text_upper = r.get("text", "").upper()
+                is_dup = any(pat in rule_text_upper for pat in dict_patterns if len(pat) > 3)
+                if not is_dup:
+                    manual_rules.append(r)
             learned["rules"] = manual_rules + dict_rules
         elif dict_rules:
             sections.append({
@@ -244,7 +292,7 @@ async def get_all_rules(user=Depends(get_current_user)):
             })
         
         if dict_rules:
-            log.info("[GoldenRules] Merged %d dictionary rules into 'learned' section", len(dict_rules))
+            log.info("[GoldenRules] Merged %d deduplicated dictionary rules into 'learned' section", len(dict_rules))
     except Exception as e:
         log.warning("[GoldenRules] Could not merge dictionary rules: %s", e)
     
