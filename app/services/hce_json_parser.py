@@ -53,6 +53,31 @@ def _medical_title_case(text: str) -> str:
     return " ".join(result)
 
 
+# Prepositions/connectors that indicate an incomplete name if they're the last word
+_TRAILING_PREPOSITIONS = {"POR", "PARA", "DE", "DEL", "CON", "EN", "A", "AL", "Y", "O", "E", "SIN", "SOBRE"}
+
+
+def _is_incomplete_procedure(descripcion: str) -> bool:
+    """
+    Detect incomplete/truncated procedure names.
+    E.g.: "CIRUGIA POR", "CIRUGIA PARA", "TRATAMIENTO DE"
+    These end with a preposition, which makes no sense as a standalone name.
+    """
+    if not descripcion:
+        return True
+    words = descripcion.upper().strip().split()
+    if not words:
+        return True
+    # A name ending with a preposition is incomplete
+    if words[-1] in _TRAILING_PREPOSITIONS:
+        return True
+    # A single generic word without specificity is too vague
+    if len(words) == 1 and words[0] in {"CIRUGIA", "TRATAMIENTO", "OPERACION", "PROCEDIMIENTO", "CONSULTA",
+                                          "ESTUDIO", "EVALUACION", "CONTROL", "TERAPIA"}:
+        return True
+    return False
+
+
 # =============================================================================
 # CATEGORIZACIÓN DE PROCEDIMIENTOS
 # =============================================================================
@@ -866,6 +891,10 @@ def sort_and_group_procedures(
         
         should_skip = any(kw in desc_upper for kw in skip_keywords)
         if should_skip:
+            continue
+        
+        # 6. Filtrar nombres incompletos ("CIRUGIA POR", "TRATAMIENTO DE")
+        if _is_incomplete_procedure(descripcion):
             continue
         
         # ¡Este procedimiento es importante! Agregarlo
