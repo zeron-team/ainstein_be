@@ -2076,6 +2076,14 @@ async def approve_section_correction(
                         },
                         "$inc": {"frequency": 1},
                         "$addToSet": {"source_corrections": correction_id},
+                        "$push": {"audit_log": {
+                            "action": "updated",
+                            "type": "move",
+                            "by": approver_name,
+                            "at": datetime.utcnow().isoformat(),
+                            "correction_id": correction_id,
+                            "patient_id": correction_doc.get("patient_id", ""),
+                        }},
                     }
                 )
             else:
@@ -2087,6 +2095,15 @@ async def approve_section_correction(
                     "frequency": 1,
                     "created_at": datetime.utcnow(),
                     "updated_at": datetime.utcnow(),
+                    "created_by": approver_name,
+                    "audit_log": [{
+                        "action": "created",
+                        "type": "move",
+                        "by": approver_name,
+                        "at": datetime.utcnow().isoformat(),
+                        "correction_id": correction_id,
+                        "patient_id": correction_doc.get("patient_id", ""),
+                    }],
                 })
             
             log.info(
@@ -2116,6 +2133,14 @@ async def approve_section_correction(
                         },
                         "$inc": {"frequency": 1},
                         "$addToSet": {"source_corrections": correction_id},
+                        "$push": {"audit_log": {
+                            "action": "updated",
+                            "type": "confirm",
+                            "by": approver_name,
+                            "at": datetime.utcnow().isoformat(),
+                            "correction_id": correction_id,
+                            "patient_id": correction_doc.get("patient_id", ""),
+                        }},
                     }
                 )
             else:
@@ -2126,6 +2151,15 @@ async def approve_section_correction(
                     "frequency": 1,
                     "created_at": datetime.utcnow(),
                     "updated_at": datetime.utcnow(),
+                    "created_by": approver_name,
+                    "audit_log": [{
+                        "action": "created",
+                        "type": "confirm",
+                        "by": approver_name,
+                        "at": datetime.utcnow().isoformat(),
+                        "correction_id": correction_id,
+                        "patient_id": correction_doc.get("patient_id", ""),
+                    }],
                 })
         
         elif action == "remove" and item_text:
@@ -2150,6 +2184,14 @@ async def approve_section_correction(
                             },
                             "$inc": {"frequency": 1},
                             "$addToSet": {"source_corrections": correction_id},
+                            "$push": {"audit_log": {
+                                "action": "updated",
+                                "type": "exclude",
+                                "by": approver_name,
+                                "at": datetime.utcnow().isoformat(),
+                                "correction_id": correction_id,
+                                "patient_id": correction_doc.get("patient_id", ""),
+                            }},
                         }
                     )
                 else:
@@ -2160,6 +2202,15 @@ async def approve_section_correction(
                         "frequency": 1,
                         "created_at": datetime.utcnow(),
                         "updated_at": datetime.utcnow(),
+                        "created_by": approver_name,
+                        "audit_log": [{
+                            "action": "created",
+                            "type": "exclude",
+                            "by": approver_name,
+                            "at": datetime.utcnow().isoformat(),
+                            "correction_id": correction_id,
+                            "patient_id": correction_doc.get("patient_id", ""),
+                        }],
                     })
                 
                 log.info(

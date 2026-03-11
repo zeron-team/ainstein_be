@@ -215,6 +215,10 @@ async def get_all_rules(user=Depends(get_current_user)):
                 "item_pattern": item,
                 "target_section": target,
                 "frequency": freq,
+                "created_by": doc.get("created_by", "sistema"),
+                "created_at": str(doc.get("created_at", "")) if doc.get("created_at") else None,
+                "updated_at": str(doc.get("updated_at", "")) if doc.get("updated_at") else None,
+                "audit_log": doc.get("audit_log", []),
             }
             # Preserve processed state from dictionary
             if doc.get("processed"):
