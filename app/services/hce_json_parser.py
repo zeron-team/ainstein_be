@@ -14,6 +14,45 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 
+# Medical acronyms/abbreviations that should stay ALL CAPS
+_KEEP_UPPER = {
+    "TAC", "RMN", "RX", "ECG", "EEG", "EMG", "VCC", "VEDA", "CPRE",
+    "PCR", "LDH", "VSG", "TSH", "HIV", "HCV", "HBV", "PSA", "CEA",
+    "ARM", "PET", "SPECT", "DLEE", "AKM", "JJ", "SNC", "UTI",
+    "CVC", "DIU", "VNI", "HTA", "EPOC", "IAM", "ACV", "TVP", "TEP",
+    "IC", "IR", "IV", "VO", "IM", "SC", "EV", "IOT", "CIE10",
+    "II", "III", "IV", "VI", "VII", "VIII", "IX", "XI", "XII",
+}
+_LOWERCASE_WORDS = {"de", "del", "con", "por", "para", "en", "el", "la", "al", "los", "las", "un", "una", "y", "o", "e"}
+
+
+def _medical_title_case(text: str) -> str:
+    """
+    Convert ALL CAPS medical text to Title Case, preserving medical acronyms.
+    E.g.: "LITOTRICIA URETERAL ENDOSCOPICA CON CATETER JJ" → "Litotricia Ureteral Endoscopica Con Cateter JJ"
+    """
+    if not text:
+        return text
+    
+    words = text.split()
+    result = []
+    for i, word in enumerate(words):
+        # Strip punctuation for checking, preserve it in output
+        clean = word.strip("(),.-;:")
+        prefix = word[:len(word) - len(word.lstrip("(),.-;:"))]
+        suffix = word[len(word.rstrip("(),.-;:")):]  if word.rstrip("(),.-;:") != word else ""
+        
+        if clean.upper() in _KEEP_UPPER:
+            result.append(prefix + clean.upper() + suffix)
+        elif i > 0 and clean.lower() in _LOWERCASE_WORDS:
+            result.append(prefix + clean.lower() + suffix)
+        else:
+            # Title case: first letter uppercase, rest lowercase
+            result.append(prefix + clean.capitalize() + suffix)
+    
+    return " ".join(result)
+
+
 # =============================================================================
 # CATEGORIZACIÓN DE PROCEDIMIENTOS
 # =============================================================================
@@ -858,6 +897,7 @@ def sort_and_group_procedures(
         fechas = info["fechas"]
         
         # Formato: "Nombre (fecha1, fecha2)" o solo "Nombre" si no hay fechas
+        nombre_fmt = _medical_title_case(nombre)
         if fechas:
             # Ordenar fechas cronológicamente
             try:
@@ -865,9 +905,9 @@ def sort_and_group_procedures(
             except:
                 fechas_sorted = fechas
             fechas_str = ", ".join(fechas_sorted)
-            result.append(f"{nombre} ({fechas_str})")
+            result.append(f"{nombre_fmt} ({fechas_str})")
         else:
-            result.append(nombre)
+            result.append(nombre_fmt)
     
     # Agregar AKM agrupado al final si hubo
     if akm_count > 0:
@@ -1035,6 +1075,7 @@ def extract_studies_chronologically(
     # Construir resultado: "Nombre (fecha1, fecha2)"
     result = []
     for nombre, fechas in estudios_por_tipo.items():
+        nombre_fmt = _medical_title_case(nombre)
         if fechas:
             # Ordenar fechas cronológicamente
             try:
@@ -1042,9 +1083,9 @@ def extract_studies_chronologically(
             except:
                 fechas_sorted = fechas
             fechas_str = ", ".join(fechas_sorted)
-            result.append(f"{nombre} ({fechas_str})")
+            result.append(f"{nombre_fmt} ({fechas_str})")
         else:
-            result.append(nombre)
+            result.append(nombre_fmt)
     
     return result
 

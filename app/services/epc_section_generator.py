@@ -485,9 +485,10 @@ def sort_procedures_chronologically(procedures: List[Dict[str, Any]]) -> List[st
     
     # Formatear como strings
     result = []
+    from app.services.hce_json_parser import _medical_title_case
     for p in sorted_procs:
         fecha = p.get("fecha", "")
-        descripcion = p.get("descripcion", "") or p.get("tipo", "")
+        descripcion = _medical_title_case(p.get("descripcion", "") or p.get("tipo", ""))
         if fecha and descripcion:
             result.append(f"{fecha} - {descripcion}")
         elif descripcion:
