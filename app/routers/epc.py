@@ -3235,7 +3235,7 @@ async def get_epc_dashboard_control(
         if agg["total"] > 0:
             approval = round((agg["ok"] / agg["total"]) * 100, 1)
 
-    # --- Últimas evaluaciones ---
+    # --- Últimas evaluaciones (MongoDB feedback + SQL events) ---
     recent = []
     recent_cursor = mongo.epc_feedback.find({"status": {"$in": ["completed", None]}}).sort("created_at", -1).limit(100)
     async for doc in recent_cursor:
@@ -3260,6 +3260,57 @@ async def get_epc_dashboard_control(
             "is_confusing": doc.get("is_confusing"),
             "created_at": doc["created_at"].isoformat() if doc.get("created_at") else None,
         })
+
+    # Also merge recent SQL epc_events — only VALIDATION events, deduplicated
+    try:
+        from app.domain.models import EPCEvent
+        validation_events = (
+            db.query(EPCEvent)
+            .filter(EPCEvent.action.like("%validada%"))
+            .order_by(EPCEvent.at.desc())
+            .all()
+        )
+        # Deduplicate: keep only latest validation per (epc_id, user)
+        seen_validations: set = set()  # (epc_id, user)
+        unique_validations = []
+        for ev in validation_events:
+            key = (ev.epc_id, ev.by)
+            if key not in seen_validations:
+                seen_validations.add(key)
+                unique_validations.append(ev)
+
+        # Build a patient_name cache for SQL events
+        event_epc_ids = list({ev.epc_id for ev in unique_validations})
+        event_patient_cache = {}
+        if event_epc_ids:
+            cursor_ev = mongo.epc_docs.find(
+                {"_id": {"$in": event_epc_ids}},
+                {"patient_id": 1}
+            )
+            async for edoc in cursor_ev:
+                pid = str(edoc.get("patient_id", ""))
+                event_patient_cache[edoc["_id"]] = patient_name_map.get(pid)
+
+        for ev in unique_validations:
+            recent.append({
+                "user_id": None,
+                "user_name": ev.by or "sistema",
+                "epc_id": ev.epc_id,
+                "patient_name": event_patient_cache.get(ev.epc_id),
+                "section": "validación",
+                "rating": "validación",
+                "feedback_text": ev.action,
+                "has_omissions": None,
+                "has_repetitions": None,
+                "is_confusing": None,
+                "created_at": ev.at.isoformat() if ev.at else None,
+            })
+    except Exception as exc:
+        log.warning("[dashboard-control] Error loading recent SQL events: %s", exc)
+
+    # Sort all recent entries by date
+    recent.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    recent = recent[:150]  # Keep last 150
 
     # --- Evaluaciones por Paciente/EPC ---
     epc_pipeline = [
