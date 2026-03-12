@@ -2295,14 +2295,29 @@ async def get_section_dictionary(
     
     rules = []
     async for doc in cursor:
+        # Build serializable audit_log
+        raw_audit = doc.get("audit_log", [])
+        audit_log = []
+        for entry in (raw_audit if isinstance(raw_audit, list) else []):
+            if isinstance(entry, dict):
+                audit_log.append({
+                    "action": entry.get("action", ""),
+                    "by": entry.get("by", ""),
+                    "at": entry.get("at").isoformat() if hasattr(entry.get("at"), "isoformat") else str(entry.get("at", "")),
+                    "patient_id": entry.get("patient_id", ""),
+                    "type": entry.get("type", ""),
+                })
+        
         rules.append({
             "id": str(doc.get("_id")),
             "item_pattern": doc.get("item_pattern"),
             "target_section": doc.get("target_section"),
             "frequency": doc.get("frequency", 1),
             "source_corrections": doc.get("source_corrections", []),
+            "created_by": doc.get("created_by", "sistema"),
             "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
             "updated_at": doc.get("updated_at").isoformat() if doc.get("updated_at") else None,
+            "audit_log": audit_log,
         })
     
     return {
