@@ -2968,7 +2968,7 @@ async def get_feedback_grouped(
     
     # Obtener todos los feedbacks completados (o legacy sin status)
     cursor = mongo.epc_feedback.find({"status": {"$in": ["completed", None]}}).sort("created_at", -1)
-    all_feedbacks = await cursor.to_list(500)  # Limitar a 500 feedbacks
+    all_feedbacks = await cursor.to_list(5000)  # Increased from 500 to prevent dropping evaluations
     
     if not all_feedbacks:
         return {"grouped_epc": []}
