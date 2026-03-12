@@ -2308,13 +2308,48 @@ async def get_section_dictionary(
                     "type": entry.get("type", ""),
                 })
         
+        # Extract creator from processed_by (stringified dict) if created_by absent
+        created_by = doc.get("created_by", "")
+        processed_by_raw = doc.get("processed_by", "")
+        processed_by_user = ""
+        if processed_by_raw and isinstance(processed_by_raw, str):
+            # Format: "{'id': '...', 'role': 'admin', 'username': 'secimino'}"
+            import re as _re
+            m = _re.search(r"'username':\s*'([^']+)'", processed_by_raw)
+            if m:
+                processed_by_user = m.group(1)
+        
+        if not created_by:
+            created_by = processed_by_user or "sistema"
+        
+        # If no audit_log, create synthetic entry from processed_by
+        if not audit_log and processed_by_user:
+            processed_at = doc.get("processed_at", "")
+            audit_log.append({
+                "action": "processed",
+                "by": processed_by_user,
+                "at": processed_at if isinstance(processed_at, str) else (processed_at.isoformat() if hasattr(processed_at, "isoformat") else str(processed_at)),
+                "patient_id": "",
+                "type": "aprobación",
+            })
+        
+        # If still no audit_log, create from created_at
+        if not audit_log and doc.get("created_at"):
+            audit_log.append({
+                "action": "created",
+                "by": created_by,
+                "at": doc["created_at"].isoformat() if hasattr(doc["created_at"], "isoformat") else str(doc["created_at"]),
+                "patient_id": "",
+                "type": "creación",
+            })
+        
         rules.append({
             "id": str(doc.get("_id")),
             "item_pattern": doc.get("item_pattern"),
             "target_section": doc.get("target_section"),
             "frequency": doc.get("frequency", 1),
             "source_corrections": doc.get("source_corrections", []),
-            "created_by": doc.get("created_by", "sistema"),
+            "created_by": created_by,
             "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
             "updated_at": doc.get("updated_at").isoformat() if doc.get("updated_at") else None,
             "audit_log": audit_log,
