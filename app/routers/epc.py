@@ -3279,7 +3279,32 @@ async def get_epc_dashboard_control(
         {"$sort": {"last_evaluation": -1}},
     ]
 
+    # Build a map of validators from SQL epc_events
+    # Validators are users who changed EPC estado to "validada"
+    epc_validators: Dict[str, set] = {}  # epc_id -> set of usernames
+    epc_validator_dates: Dict[str, dict] = {}  # epc_id -> {username: latest_at}
+    try:
+        from app.domain.models import EPCEvent
+        validation_events = (
+            db.query(EPCEvent)
+            .filter(EPCEvent.action.like("%validada%"))
+            .all()
+        )
+        for ev in validation_events:
+            eid = ev.epc_id
+            uname = ev.by or "sistema"
+            if eid not in epc_validators:
+                epc_validators[eid] = set()
+                epc_validator_dates[eid] = {}
+            epc_validators[eid].add(uname)
+            # Track latest validation date per user
+            if uname not in epc_validator_dates[eid] or (ev.at and ev.at > epc_validator_dates[eid].get(uname, ev.at)):
+                epc_validator_dates[eid][uname] = ev.at
+    except Exception as exc:
+        log.warning("[dashboard-control] Error loading validators from SQL: %s", exc)
+
     by_epc = []
+    by_epc_map = {}  # epc_id -> index in by_epc (for merging validators later)
     async for doc in mongo.epc_feedback.aggregate(epc_pipeline):
         epc_id = doc["_id"]
         total = doc["total_evaluations"]
@@ -3299,11 +3324,18 @@ async def get_epc_dashboard_control(
                 patient_name = patient_name_map.get(pid)
                 epc_created = epc_doc.get("created_at")
 
+        # Merge validators from SQL into evaluators list
+        evaluators = set(doc.get("evaluators", []))
+        if epc_id in epc_validators:
+            evaluators.update(epc_validators[epc_id])
+        evaluators_list = sorted(evaluators)
+
+        by_epc_map[epc_id] = len(by_epc)
         by_epc.append({
             "epc_id": epc_id,
             "patient_name": patient_name or epc_id[:12] + "..." if epc_id else "—",
-            "evaluators": doc.get("evaluators", []),
-            "evaluator_count": len(doc.get("evaluators", [])),
+            "evaluators": evaluators_list,
+            "evaluator_count": len(evaluators_list),
             "total_evaluations": total,
             "ok_count": ok,
             "partial_count": doc["partial_count"],
@@ -3333,12 +3365,16 @@ async def get_epc_dashboard_control(
     ]
 
     by_epc_evaluator = []
+    # Track which (epc_id, evaluator_name) combos already exist from feedback
+    existing_eval_combos = set()
     async for doc in mongo.epc_feedback.aggregate(epc_evaluator_pipeline):
         epc_id = doc["_id"]["epc_id"]
         evaluator_name = doc["_id"]["evaluator"] or "—"
         total = doc["total_evaluations"]
         ok = doc["ok_count"]
         ok_pct = round((ok / total) * 100, 1) if total > 0 else 0
+
+        existing_eval_combos.add((epc_id, evaluator_name))
 
         # Buscar nombre de paciente y fecha de creación de EPC
         patient_name = None
@@ -3367,6 +3403,57 @@ async def get_epc_dashboard_control(
             "first_evaluation": doc["first_evaluation"].isoformat() if doc.get("first_evaluation") else None,
             "last_evaluation": doc["last_evaluation"].isoformat() if doc.get("last_evaluation") else None,
         })
+
+    # Add validator-only entries (users who validated but didn't submit section feedback)
+    for val_epc_id, validators in epc_validators.items():
+        for vname in validators:
+            if (val_epc_id, vname) not in existing_eval_combos:
+                # This validator has no section feedback — add as validator-only entry
+                patient_name = None
+                epc_created = None
+                epc_doc = await mongo.epc_docs.find_one(
+                    {"_id": val_epc_id},
+                    {"patient_id": 1, "created_at": 1}
+                )
+                if epc_doc:
+                    pid = str(epc_doc.get("patient_id", ""))
+                    patient_name = patient_name_map.get(pid)
+                    epc_created = epc_doc.get("created_at")
+
+                val_date = epc_validator_dates.get(val_epc_id, {}).get(vname)
+                by_epc_evaluator.append({
+                    "epc_id": val_epc_id,
+                    "patient_name": patient_name or val_epc_id[:12] + "..." if val_epc_id else "—",
+                    "evaluator_name": f"{vname} (validador)",
+                    "evaluator_id": None,
+                    "total_evaluations": 0,
+                    "ok_count": 0,
+                    "partial_count": 0,
+                    "bad_count": 0,
+                    "ok_pct": 0,
+                    "epc_created": epc_created.isoformat() if epc_created else None,
+                    "first_evaluation": val_date.isoformat() if val_date else None,
+                    "last_evaluation": val_date.isoformat() if val_date else None,
+                })
+
+                # Also make sure this EPC is in by_epc (it might not be if it has no feedback)
+                if val_epc_id not in by_epc_map:
+                    evaluators_list = sorted(epc_validators[val_epc_id])
+                    by_epc_map[val_epc_id] = len(by_epc)
+                    by_epc.append({
+                        "epc_id": val_epc_id,
+                        "patient_name": patient_name or val_epc_id[:12] + "..." if val_epc_id else "—",
+                        "evaluators": evaluators_list,
+                        "evaluator_count": len(evaluators_list),
+                        "total_evaluations": 0,
+                        "ok_count": 0,
+                        "partial_count": 0,
+                        "bad_count": 0,
+                        "ok_pct": 0,
+                        "epc_created": epc_created.isoformat() if epc_created else None,
+                        "first_evaluation": val_date.isoformat() if val_date else None,
+                        "last_evaluation": val_date.isoformat() if val_date else None,
+                    })
 
     return {
         "kpis": {
