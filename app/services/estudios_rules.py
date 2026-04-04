@@ -55,6 +55,12 @@ ESTUDIOS_POR_CATEGORIA: Dict[str, Dict[str, str]] = {
         "TC SC": "TC sin contraste",
         "ANGIO-TC": "Angiotomografía",
         "ANGIOTC": "Angiotomografía",
+        "ANGIO-TAC": "Angiotomografía",
+        "ANGIOTAC": "Angiotomografía",
+        "ANGIOTOMOGRAFIA": "Angiotomografía",
+        "ANGIOTOMOGRAFÍA": "Angiotomografía",
+        "ANGIO TOMOGRAFIA": "Angiotomografía",
+        "ANGIO TOMOGRAFÍA": "Angiotomografía",
         "TCAR": "TC de alta resolución",
         "TC CARD": "TC cardíaca",
         "TC COR": "TC coronaria",
@@ -118,6 +124,8 @@ ESTUDIOS_POR_CATEGORIA: Dict[str, Dict[str, str]] = {
         "PET-CT FDG": "PET-TC oncológico",
         "PET-CT": "PET-TC oncológico",
         "PETCT": "PET-TC oncológico",
+        "PET-TC": "PET-TC oncológico",
+        "PET/TC": "PET-TC oncológico",
         "SPECT CEREB": "SPECT cerebral",
         "SPECT": "SPECT",
         "HIDA": "Centellograma hepatobiliar",
@@ -133,6 +141,8 @@ ESTUDIOS_POR_CATEGORIA: Dict[str, Dict[str, str]] = {
         "CBCT": "Tomografía haz cónico",
         "MAMOGRAFIA": "Mamografía",
         "DENSITOMETRIA": "Densitometría ósea",
+        "ANGIOGRAFIA": "Angiografía",
+        "ANGIOGRAFÍA": "Angiografía",
     },
     
     # =========================================================================
@@ -213,6 +223,9 @@ ESTUDIOS_POR_CATEGORIA: Dict[str, Dict[str, str]] = {
         "HISTEROSCOPIA": "Histeroscopía",
         "ARTROSCOPIA": "Artroscopía",
         "LAPAROSCOPIA": "Laparoscopía",
+        "CPRE": "Colangiopancreatografía Retrógrada Endoscópica",
+        "COLANGIOPANCREATOGRAFIA": "Colangiopancreatografía Retrógrada Endoscópica",
+        "FIBROBRONCOSCOPIA": "Fibrobroncoscopía",
     },
     
     # =========================================================================

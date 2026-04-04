@@ -203,15 +203,26 @@ async def list_tenants(
     
     tenants = query.order_by(Tenant.created_at.desc()).all()
     
-    result = []
-    for t in tenants:
-        api_key_count = db.query(TenantAPIKey).filter(
-            TenantAPIKey.tenant_id == t.id,
-            TenantAPIKey.is_active == True
-        ).count()
-        result.append(build_tenant_response(t, api_key_count))
+    # Batch query: get active API key counts for all tenants in one query (avoids N+1)
+    from sqlalchemy import func
+    tenant_ids = [t.id for t in tenants]
+    key_counts = {}
+    if tenant_ids:
+        rows = (
+            db.query(TenantAPIKey.tenant_id, func.count(TenantAPIKey.id))
+            .filter(
+                TenantAPIKey.tenant_id.in_(tenant_ids),
+                TenantAPIKey.is_active == True,
+            )
+            .group_by(TenantAPIKey.tenant_id)
+            .all()
+        )
+        key_counts = {tid: cnt for tid, cnt in rows}
     
-    return result
+    return [
+        build_tenant_response(t, key_counts.get(t.id, 0))
+        for t in tenants
+    ]
 
 
 @router.post(

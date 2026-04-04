@@ -33,6 +33,14 @@ class EPCGeneratedContent(BaseModel):
     recomendaciones: List[str] = Field(default_factory=list, description="Recomendaciones de seguimiento")
     diagnostico_principal: Optional[str] = Field(default=None, description="Diagnóstico principal")
     diagnosticos_secundarios: List[str] = Field(default_factory=list, description="Diagnósticos secundarios")
+    
+    # Soporte para Extractor Multi-Pass
+    estudios_completos: Optional[List[str]] = Field(default=None)
+    procedimientos_completos: Optional[List[str]] = Field(default=None)
+    interconsultas_completas: Optional[List[str]] = Field(default=None)
+    estudios_adicionales_mencionados: Optional[List[str]] = Field(default=None)
+    procedimientos_adicionales_mencionados: Optional[List[str]] = Field(default=None)
+    interconsultas_adicionales_mencionadas: Optional[List[str]] = Field(default=None)
 
 
 class PatientExtractedData(BaseModel):
@@ -148,36 +156,48 @@ def _smart_match_exclude(pattern_normalized: str, item_normalized: str) -> bool:
     
     Uses three strategies:
     1. Exact substring match (original behavior)
-    2. Stem-based match: stems of pattern words found in item text
-    3. Word-boundary match: any word in the item starts with the pattern stem
+    2. ALL-words stem-based match: ALL significant stems from the pattern must be found
+       in the item text. This prevents false positives like 'COLOCACION' alone matching
+       'Colocación de Stent carotideo' when the rule is 'SONDA VESICAL - COLOCACION'.
     """
     # 1. Exact substring match
     if pattern_normalized in item_normalized:
         return True
     
-    # 2. Stem-based matching
+    # 2. ALL-words stem-based matching
     # Get stems for all significant words in the pattern (≥4 chars)
     pattern_words = [w for w in pattern_normalized.split() if len(w) >= 4]
     if not pattern_words:
         return False
     
     item_words = [w for w in item_normalized.split() if len(w) >= 4]
+    item_stems = {_spanish_stem(w) for w in item_words}
+    # Also include raw words for prefix matching
+    item_word_set = set(item_words)
     
+    # ALL pattern words must have a matching stem in the item
+    matched_count = 0
     for p_word in pattern_words:
         p_stem = _spanish_stem(p_word)
         if len(p_stem) < 4:
+            matched_count += 1  # Skip very short stems, count as matched
             continue
         
-        # Check if any item word shares the same stem or starts with the pattern stem
-        for i_word in item_words:
-            i_stem = _spanish_stem(i_word)
-            if p_stem == i_stem:
-                return True
-            # Also check prefix match (NEBULIZ in NEBULIZABLE)
-            if i_word.startswith(p_stem) or p_word.startswith(i_stem):
-                return True
+        word_matched = False
+        if p_stem in item_stems:
+            word_matched = True
+        else:
+            # Check prefix match
+            for i_word in item_words:
+                if i_word.startswith(p_stem) or p_word.startswith(_spanish_stem(i_word)):
+                    word_matched = True
+                    break
+        
+        if word_matched:
+            matched_count += 1
     
-    return False
+    # ALL significant words must match
+    return matched_count == len(pattern_words)
 
 
 def _apply_dictionary_rules(result: Dict[str, Any], dictionary_rules: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -347,6 +367,49 @@ def _post_process_epc_result(result: Dict[str, Any], dictionary_rules: Optional[
     # PRIMERO: Aplicar reglas del diccionario de secciones (REGLA DE ORO)
     if dictionary_rules:
         result = _apply_dictionary_rules(result, dictionary_rules)
+        
+    # FALLBACK SISTÉMICO ANTI-CONTAMINACIÓN DE CONSULTAS
+    # Identifica si una Consulta Médica burló el LLM colándose en procedimientos
+    for source_section in ["procedimientos", "estudios"]:
+        items = result.get(source_section, [])
+        if not isinstance(items, list):
+            continue
+            
+        items_to_remove = []
+        for item in items:
+            if isinstance(item, str) and "consulta" in item.lower():
+                items_to_remove.append(item)
+                
+        if items_to_remove:
+            result[source_section] = [i for i in items if i not in items_to_remove]
+            interconsultas = result.get("interconsultas", [])
+            if not isinstance(interconsultas, list):
+                interconsultas = []
+                
+            for bad_item in items_to_remove:
+                # 1. Strip the trailing date and parenthesis
+                clean_item = re.sub(r'\s*\(\d{1,2}/\d{1,2}(?:/\d{2,4})?\)\s*$', '', bad_item)
+                # 2. Strip " - Consulta"
+                clean_item = re.sub(r'(?i)\s*-\s*consulta.*$', '', clean_item).strip()
+                
+                # 3. Add to interconsultas if not duplicate
+                if clean_item and not any(_normalize_for_matching(clean_item) == _normalize_for_matching(existing) for existing in interconsultas if isinstance(existing, str)):
+                    interconsultas.append(clean_item)
+                    log.warning(f"[AntiContaminacion] Extraído '{bad_item}' de {source_section} -> movido a interconsultas como '{clean_item}'")
+            result["interconsultas"] = interconsultas
+            
+    # Última pasada general para limpiar guiones sueltos en interconsultas ("Otorrinolaringología - ", "Cardiología - ")
+    # y también puntos, que suelen quedar finales.
+    final_interconsultas = result.get("interconsultas", [])
+    if isinstance(final_interconsultas, list):
+        cleaned_final = []
+        for ic in final_interconsultas:
+            if isinstance(ic, str):
+                # Eliminar guiones, dos puntos, comas o puntos al final de la linea
+                ic_clean = re.sub(r'[\s\-:,\.]+$', '', ic)
+                if ic_clean and ic_clean not in cleaned_final:
+                    cleaned_final.append(ic_clean)
+        result["interconsultas"] = cleaned_final
     
     evolucion = result.get("evolucion", "")
     evolucion_lower = evolucion.lower()

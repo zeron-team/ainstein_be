@@ -1235,6 +1235,8 @@ async def generate_epc(
         indicaciones_alta = data.get("indicaciones_alta", []) or []
         notas_alta = data.get("notas_alta", []) or []
         
+        print(f"[generate_epc] ▶ procedimientos={len(procedimientos)}, estudios={len(data.get('estudios', []))}, interconsultas={len(interconsultas)}")
+        
         # FALLBACK: Si interconsultas está vacío pero interconsultas_detalle tiene datos, usar eso
         if not interconsultas:
             ic_detalle = data.get("interconsultas_detalle", []) or []
@@ -1996,9 +1998,9 @@ async def get_all_section_corrections(
                 if p.dni:
                     display = f"{p.dni} - {display}"
                 patient_name_map[str(p.id)] = display
-        except Exception:
-            pass
-    
+        except Exception as exc:
+            log.warning("[corrections] Error loading patient names: %s", exc)
+
     # 3. Agregar patient_id y patient_name a cada corrección
     # 4. Resolver user_name para correcciones antiguas sin nombre almacenado
     user_ids_to_resolve = set()
@@ -2019,8 +2021,8 @@ async def get_all_section_corrections(
             ).all()
             for u in users:
                 user_name_map[str(u.id)] = u.full_name or u.username or str(u.id)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("[corrections] Error loading user names: %s", exc)
     
     for c in corrections:
         if not c.get("user_name") and c.get("user_id"):
@@ -2084,6 +2086,8 @@ async def approve_section_correction(
         if action == "move" and correction_doc.get("to_section") and item_text:
             # Normalizar: extraer parte descriptiva sin fecha
             item_normalized = re.sub(r'^\d{1,2}/\d{1,2}/\d{2,4}\s*[-–]?\s*', '', item_text).strip().upper()
+            # Strip trailing parenthesized dates: "SONDA VESICAL (29/01/2026)" → "SONDA VESICAL"
+            item_normalized = re.sub(r'\s*\([^)]*\)\s*$', '', item_normalized).strip()
             
             target_section = correction_doc["to_section"]
             
@@ -2093,7 +2097,10 @@ async def approve_section_correction(
             )
             
             if existing:
-                # Incrementar frecuencia y actualizar sección destino
+                update_add_to_set = {"source_corrections": correction_id}
+                if correction_doc.get("from_section"):
+                    update_add_to_set["from_sections"] = correction_doc["from_section"]
+
                 await mongo.section_mapping_dictionary.update_one(
                     {"_id": existing["_id"]},
                     {
@@ -2102,7 +2109,7 @@ async def approve_section_correction(
                             "updated_at": datetime.utcnow(),
                         },
                         "$inc": {"frequency": 1},
-                        "$addToSet": {"source_corrections": correction_id},
+                        "$addToSet": update_add_to_set,
                         "$push": {"audit_log": {
                             "action": "updated",
                             "type": "move",
@@ -2115,10 +2122,11 @@ async def approve_section_correction(
                 )
             else:
                 # Crear nueva regla
-                await mongo.section_mapping_dictionary.insert_one({
+                doc_to_insert = {
                     "item_pattern": item_normalized,
                     "target_section": target_section,
                     "source_corrections": [correction_id],
+                    "from_sections": [correction_doc["from_section"]] if correction_doc.get("from_section") else [],
                     "frequency": 1,
                     "created_at": datetime.utcnow(),
                     "updated_at": datetime.utcnow(),
@@ -2131,7 +2139,8 @@ async def approve_section_correction(
                         "correction_id": correction_id,
                         "patient_id": correction_doc.get("patient_id", ""),
                     }],
-                })
+                }
+                await mongo.section_mapping_dictionary.insert_one(doc_to_insert)
             
             log.info(
                 "[section-dictionary] Regla %s: '%s' -> %s (freq=%d)",
@@ -2144,6 +2153,8 @@ async def approve_section_correction(
         elif action == "confirm" and correction_doc.get("from_section") and item_text:
             # Confirmar refuerza que el item pertenece a from_section
             item_normalized = re.sub(r'^\d{1,2}/\d{1,2}/\d{2,4}\s*[-–]?\s*', '', item_text).strip().upper()
+            # Strip trailing parenthesized dates: "SONDA VESICAL (29/01/2026)" → "SONDA VESICAL"
+            item_normalized = re.sub(r'\s*\([^)]*\)\s*$', '', item_normalized).strip()
             target_section = correction_doc["from_section"]
             
             existing = await mongo.section_mapping_dictionary.find_one(
@@ -2151,6 +2162,10 @@ async def approve_section_correction(
             )
             
             if existing:
+                update_add_to_set = {"source_corrections": correction_id}
+                if correction_doc.get("from_section"):
+                    update_add_to_set["from_sections"] = correction_doc["from_section"]
+
                 await mongo.section_mapping_dictionary.update_one(
                     {"_id": existing["_id"]},
                     {
@@ -2159,7 +2174,7 @@ async def approve_section_correction(
                             "updated_at": datetime.utcnow(),
                         },
                         "$inc": {"frequency": 1},
-                        "$addToSet": {"source_corrections": correction_id},
+                        "$addToSet": update_add_to_set,
                         "$push": {"audit_log": {
                             "action": "updated",
                             "type": "confirm",
@@ -2171,10 +2186,11 @@ async def approve_section_correction(
                     }
                 )
             else:
-                await mongo.section_mapping_dictionary.insert_one({
+                doc_to_insert = {
                     "item_pattern": item_normalized,
                     "target_section": target_section,
                     "source_corrections": [correction_id],
+                    "from_sections": [correction_doc["from_section"]] if correction_doc.get("from_section") else [],
                     "frequency": 1,
                     "created_at": datetime.utcnow(),
                     "updated_at": datetime.utcnow(),
@@ -2187,7 +2203,8 @@ async def approve_section_correction(
                         "correction_id": correction_id,
                         "patient_id": correction_doc.get("patient_id", ""),
                     }],
-                })
+                }
+                await mongo.section_mapping_dictionary.insert_one(doc_to_insert)
         
         elif action == "remove" and item_text:
             # EXCLUSION: Create rule with target_section="EXCLUDE" to filter
@@ -2202,6 +2219,10 @@ async def approve_section_correction(
                 )
                 
                 if existing:
+                    update_add_to_set = {"source_corrections": correction_id}
+                    if correction_doc.get("from_section"):
+                        update_add_to_set["from_sections"] = correction_doc["from_section"]
+
                     await mongo.section_mapping_dictionary.update_one(
                         {"_id": existing["_id"]},
                         {
@@ -2210,7 +2231,7 @@ async def approve_section_correction(
                                 "updated_at": datetime.utcnow(),
                             },
                             "$inc": {"frequency": 1},
-                            "$addToSet": {"source_corrections": correction_id},
+                            "$addToSet": update_add_to_set,
                             "$push": {"audit_log": {
                                 "action": "updated",
                                 "type": "exclude",
@@ -2222,10 +2243,11 @@ async def approve_section_correction(
                         }
                     )
                 else:
-                    await mongo.section_mapping_dictionary.insert_one({
+                    doc_to_insert = {
                         "item_pattern": item_normalized,
                         "target_section": "EXCLUDE",
                         "source_corrections": [correction_id],
+                        "from_sections": [correction_doc["from_section"]] if correction_doc.get("from_section") else [],
                         "frequency": 1,
                         "created_at": datetime.utcnow(),
                         "updated_at": datetime.utcnow(),
@@ -2238,7 +2260,8 @@ async def approve_section_correction(
                             "correction_id": correction_id,
                             "patient_id": correction_doc.get("patient_id", ""),
                         }],
-                    })
+                    }
+                    await mongo.section_mapping_dictionary.insert_one(doc_to_insert)
                 
                 log.info(
                     "[section-dictionary] EXCLUDE rule %s: '%s' (freq=%d)",
@@ -2366,7 +2389,7 @@ async def get_section_dictionary(
 # -----------------------------------------------------------------------------
 class SectionFeedbackRequest(BaseModel):
     section: str  # motivo_internacion, evolucion, procedimientos, interconsultas, medicacion, indicaciones_alta, recomendaciones
-    rating: str   # ok, partial, bad
+    rating: str   # ok, partial, bad, hce_bad
     feedback_text: Optional[str] = None
     original_content: Optional[str] = None
     # Preguntas obligatorias para ratings negativos (partial/bad)
@@ -2385,6 +2408,7 @@ async def submit_section_feedback(
     """
     Guarda feedback de una sección generada por IA.
     - rating="ok" → No requiere feedback_text ni preguntas
+    - rating="hce_bad" → Problema en HCE origen, no requiere texto ni preguntas, no genera reglas
     - rating="partial" o "bad" → Requiere feedback_text y las 3 preguntas SI/NO
     
     Preguntas obligatorias para ratings negativos:
@@ -2395,8 +2419,8 @@ async def submit_section_feedback(
     Este feedback se usa para mejorar el modelo de IA a futuro.
     """
     # Validar rating
-    if body.rating not in ("ok", "partial", "bad"):
-        raise HTTPException(status_code=400, detail="Rating inválido. Usar: ok, partial, bad")
+    if body.rating not in ("ok", "partial", "bad", "hce_bad"):
+        raise HTTPException(status_code=400, detail="Rating inválido. Usar: ok, partial, bad, hce_bad")
 
     # Validar que feedback_text y las preguntas son obligatorias para ratings negativos
     if body.rating in ("partial", "bad"):
@@ -2435,12 +2459,20 @@ async def submit_section_feedback(
         "status": "draft",  # draft hasta que se complete la evaluación
     }
 
-    # Eliminar feedback anterior de la misma sección (draft o completed) del mismo usuario
-    await mongo.epc_feedback.delete_many({
+    # Archive previous feedback (never lose data), then remove from active
+    archive_filter = {
         "epc_id": epc_id,
         "section": body.section,
         "created_by": str(getattr(user, "id", None)),
-    })
+    }
+    old_docs = await mongo.epc_feedback.find(archive_filter).to_list(100)
+    if old_docs:
+        for old in old_docs:
+            old["archived_at"] = _now()
+            old["archived_reason"] = "replaced_by_new_evaluation"
+            old["replaced_by"] = _actor_name(user)
+        await mongo.db["epc_feedback_archive"].insert_many(old_docs)
+        await mongo.epc_feedback.delete_many(archive_filter)
 
     # Insertar en colección epc_feedback
     await mongo.epc_feedback.insert_one(feedback_doc)
@@ -2616,6 +2648,7 @@ async def get_feedback_stats(
     ok_count = next((t.get("count", 0) for t in totals if t["_id"] == "ok"), 0)
     partial_count = next((t.get("count", 0) for t in totals if t["_id"] == "partial"), 0)
     bad_count = next((t.get("count", 0) for t in totals if t["_id"] == "bad"), 0)
+    hce_bad_count = next((t.get("count", 0) for t in totals if t["_id"] == "hce_bad"), 0)
 
     # Reestructurar by_section para frontend
     sections_data = {}
@@ -2624,8 +2657,9 @@ async def get_feedback_stats(
         rating = item["_id"]["rating"]
         count = item["count"]
         if section not in sections_data:
-            sections_data[section] = {"ok": 0, "partial": 0, "bad": 0, "total": 0}
-        sections_data[section][rating] = count
+            sections_data[section] = {"ok": 0, "partial": 0, "bad": 0, "hce_bad": 0, "total": 0}
+        if rating in ("ok", "partial", "bad", "hce_bad"):
+            sections_data[section][rating] = count
         sections_data[section]["total"] += count
 
     # Generar insights automáticos mejorados
@@ -2798,9 +2832,11 @@ async def get_feedback_stats(
             "ok": ok_count,
             "partial": partial_count,
             "bad": bad_count,
+            "hce_bad": hce_bad_count,
             "ok_pct": round((ok_count / total_count * 100) if total_count > 0 else 0, 1),
             "partial_pct": round((partial_count / total_count * 100) if total_count > 0 else 0, 1),
             "bad_pct": round((bad_count / total_count * 100) if total_count > 0 else 0, 1),
+            "hce_bad_pct": round((hce_bad_count / total_count * 100) if total_count > 0 else 0, 1),
         },
         "by_section": sections_data,
         "questions_summary": {
@@ -2949,18 +2985,20 @@ async def get_learning_stats(
 # -----------------------------------------------------------------------------
 @router.get("/feedback/grouped")
 async def get_feedback_grouped(
+    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """
     Retorna feedbacks agrupados por EPC → Evaluador (por sesión) → Secciones.
     Incluye datos del paciente y HCE origen para cada EPC.
+    Incluye validadores de SQL que no hicieron feedback de secciones.
     
     Una sesión de evaluación son exactamente 7 secciones (una evaluación completa).
     Si el mismo evaluador evaluó la misma EPC múltiples veces, cada grupo de 7
     se muestra como una sesión separada con su propia fecha/hora.
     """
     from app.repositories.patient_repo import PatientRepo
-    from sqlalchemy.orm import Session
+    from sqlalchemy.orm import Session as SASession
     from app.core.deps import get_db
     
     # Máximo de secciones por sesión de evaluación
@@ -2970,7 +3008,29 @@ async def get_feedback_grouped(
     cursor = mongo.epc_feedback.find({"status": {"$in": ["completed", None]}}).sort("created_at", -1)
     all_feedbacks = await cursor.to_list(5000)  # Increased from 500 to prevent dropping evaluations
     
-    if not all_feedbacks:
+    # --- Load SQL validators (same logic as dashboard-control) ---
+    epc_validators: Dict[str, set] = {}        # epc_id -> set of usernames
+    epc_validator_dates: Dict[str, dict] = {}   # epc_id -> {username: latest_at}
+    try:
+        from app.domain.models import EPCEvent
+        validation_events = (
+            db.query(EPCEvent)
+            .filter(EPCEvent.action.like("%validada%"))
+            .all()
+        )
+        for ev in validation_events:
+            eid = ev.epc_id
+            uname = ev.by or "sistema"
+            if eid not in epc_validators:
+                epc_validators[eid] = set()
+                epc_validator_dates[eid] = {}
+            epc_validators[eid].add(uname)
+            if uname not in epc_validator_dates[eid] or (ev.at and ev.at > epc_validator_dates[eid].get(uname, ev.at)):
+                epc_validator_dates[eid][uname] = ev.at
+    except Exception as exc:
+        log.warning("[feedback/grouped] Error loading validators from SQL: %s", exc)
+
+    if not all_feedbacks and not epc_validators:
         return {"grouped_epc": []}
     
     # Ordenar por EPC, evaluador, y fecha para agrupar correctamente
@@ -3036,6 +3096,65 @@ async def get_feedback_grouped(
             "has_repetitions": fb.get("has_repetitions"),
             "is_confusing": fb.get("is_confusing"),
         })
+    
+    # --- Merge SQL validators copying data from real evaluator on same EPC ---
+    for val_epc_id, validators in epc_validators.items():
+        # Collect existing evaluator names for this EPC
+        existing_names = set()
+        # Find a real evaluator's sections to copy from
+        real_session = None
+        if val_epc_id in epc_map:
+            for session in epc_map[val_epc_id]["evaluators"].values():
+                existing_names.add(session.get("evaluator_name", ""))
+                if session.get("sections") and not real_session:
+                    real_session = session
+        
+        for vname in validators:
+            if vname not in existing_names:
+                if val_epc_id not in epc_map:
+                    epc_map[val_epc_id] = {
+                        "epc_id": val_epc_id,
+                        "patient_id": None,
+                        "evaluators": {},
+                    }
+                val_date = epc_validator_dates.get(val_epc_id, {}).get(vname)
+                session_key = f"validator_{vname}_1"
+
+                if real_session:
+                    # Copy sections from the real evaluator but strip comments
+                    copied_sections = []
+                    for sec in real_session["sections"]:
+                        copied_sections.append({
+                            "section": sec.get("section"),
+                            "rating": sec.get("rating"),
+                            "feedback_text": None,  # No copiar comentarios
+                            "created_at": val_date.isoformat() if val_date else sec.get("created_at"),
+                            "has_omissions": sec.get("has_omissions"),
+                            "has_repetitions": sec.get("has_repetitions"),
+                            "is_confusing": sec.get("is_confusing"),
+                        })
+                    epc_map[val_epc_id]["evaluators"][session_key] = {
+                        "evaluator_id": None,
+                        "evaluator_name": vname,
+                        "evaluated_at": val_date.isoformat() if val_date else real_session.get("evaluated_at"),
+                        "sections": copied_sections,
+                    }
+                else:
+                    # No real evaluator found, show SIN CALIFICACIÓN
+                    epc_map[val_epc_id]["evaluators"][session_key] = {
+                        "evaluator_id": None,
+                        "evaluator_name": vname,
+                        "evaluated_at": val_date.isoformat() if val_date else None,
+                        "sections": [{
+                            "section": "SIN CALIFICACIÓN",
+                            "rating": "sin_calificacion",
+                            "feedback_text": None,
+                            "created_at": val_date.isoformat() if val_date else None,
+                            "has_omissions": None,
+                            "has_repetitions": None,
+                            "is_confusing": None,
+                        }],
+                    }
     
     # Enriquecer con datos del EPC (paciente, HCE origen)
     epc_ids = list(epc_map.keys())
@@ -3103,19 +3222,27 @@ async def delete_evaluator_feedback(
     user: User = Depends(get_current_user),
 ):
     """
-    Elimina todos los feedbacks de un evaluador específico para una EPC.
-    Útil para limpiar evaluaciones de prueba.
+    Archiva y elimina todos los feedbacks de un evaluador específico para una EPC.
+    Los datos se mueven a epc_feedback_archive para preservar el historial.
     """
-    # Buscar y eliminar feedbacks que coincidan con epc_id y created_by
-    result = await mongo.epc_feedback.delete_many({
+    # Archive before deleting (never lose data)
+    archive_filter = {
         "epc_id": epc_id,
         "created_by": evaluator_id,
-    })
-    
-    deleted_count = result.deleted_count
+    }
+    old_docs = await mongo.epc_feedback.find(archive_filter).to_list(500)
+    deleted_count = 0
+    if old_docs:
+        for old in old_docs:
+            old["archived_at"] = _now()
+            old["archived_reason"] = "admin_deleted"
+            old["archived_by"] = _actor_name(user)
+        await mongo.db["epc_feedback_archive"].insert_many(old_docs)
+        result = await mongo.epc_feedback.delete_many(archive_filter)
+        deleted_count = result.deleted_count
     
     log.info(
-        "[delete_evaluator_feedback] epc_id=%s evaluator_id=%s deleted=%d by=%s",
+        "[delete_evaluator_feedback] epc_id=%s evaluator_id=%s archived+deleted=%d by=%s",
         epc_id,
         evaluator_id,
         deleted_count,
@@ -3125,7 +3252,7 @@ async def delete_evaluator_feedback(
     return {
         "ok": True,
         "deleted_count": deleted_count,
-        "message": f"Se eliminaron {deleted_count} feedbacks del evaluador.",
+        "message": f"Se archivaron y eliminaron {deleted_count} feedbacks del evaluador.",
     }
 
 
@@ -3143,6 +3270,80 @@ async def get_epc_dashboard_control(
     """
     # Precargar nombres de pacientes desde PostgreSQL
     patient_name_map: dict = {}
+    patient_dias_map: dict = {}  # patient_id -> dias (same calc as patients.py)
+    try:
+        from bson import ObjectId as BsonObjectId
+        async for epc_doc in mongo.epc_docs.find(
+            {"hce_origin_id": {"$ne": None}},
+            {"patient_id": 1, "hce_origin_id": 1}
+        ):
+            pid = str(epc_doc.get("patient_id", ""))
+            hce_origin = epc_doc.get("hce_origin_id")
+            if not pid or not hce_origin:
+                continue
+            try:
+                hce_oid = BsonObjectId(hce_origin) if isinstance(hce_origin, str) else hce_origin
+            except Exception:
+                continue
+            hce = await mongo.hce_docs.find_one(
+                {"_id": hce_oid},
+                {"structured.fecha_ingreso": 1, "structured.fecha_egreso_original": 1, "structured.fecha_egreso": 1,
+                 "ainstein.episodio.inteFechaIngreso": 1, "ainstein.episodio.inteFechaEgreso": 1}
+            )
+            if hce:
+                h_struc = hce.get("structured") or {}
+                h_ep = ((hce.get("ainstein") or {}).get("episodio") or {})
+                raw_fi = h_struc.get("fecha_ingreso") or (h_ep.get("inteFechaIngreso") if isinstance(h_ep, dict) else None)
+                raw_fe = h_struc.get("fecha_egreso_original") or h_struc.get("fecha_egreso") or (h_ep.get("inteFechaEgreso") if isinstance(h_ep, dict) else None)
+                if raw_fi:
+                    try:
+                        fi_str = str(raw_fi).replace("T", " ").split(".")[0]
+                        fmt = "%Y-%m-%d %H:%M:%S" if " " in fi_str else "%Y-%m-%d"
+                        dt_fi = datetime.strptime(fi_str, fmt)
+                        dt_fe = datetime.utcnow()
+                        if raw_fe:
+                            fe_str = str(raw_fe).replace("T", " ").split(".")[0]
+                            fmt_e = "%Y-%m-%d %H:%M:%S" if " " in fe_str else "%Y-%m-%d"
+                            dt_fe = datetime.strptime(fe_str, fmt_e)
+                        patient_dias_map[pid] = (dt_fe - dt_fi).days
+                    except Exception:
+                        pass
+    except Exception as exc:
+        log.warning("[dashboard-control] Error computing dias_estada (first pass): %s", exc)
+    # Second pass: EPCs without hce_origin_id — look up HCE by patient_id
+    try:
+        async for epc_doc in mongo.epc_docs.find(
+            {"$or": [{"hce_origin_id": None}, {"hce_origin_id": {"$exists": False}}]},
+            {"patient_id": 1}
+        ):
+            pid = str(epc_doc.get("patient_id", ""))
+            if not pid or pid in patient_dias_map:
+                continue
+            hce = await mongo.hce_docs.find_one(
+                {"patient_id": pid},
+                {"structured": 1, "ainstein.episodio": 1},
+                sort=[("created_at", -1)]
+            )
+            if hce:
+                h_struc = hce.get("structured") or {}
+                h_ep = ((hce.get("ainstein") or {}).get("episodio") or {})
+                raw_fi = h_struc.get("fecha_ingreso") or (h_ep.get("inteFechaIngreso") if isinstance(h_ep, dict) else None)
+                raw_fe = h_struc.get("fecha_egreso_original") or h_struc.get("fecha_egreso") or (h_ep.get("inteFechaEgreso") if isinstance(h_ep, dict) else None)
+                if raw_fi:
+                    try:
+                        fi_str = str(raw_fi).replace("T", " ").split(".")[0]
+                        fmt = "%Y-%m-%d %H:%M:%S" if " " in fi_str else "%Y-%m-%d"
+                        dt_fi = datetime.strptime(fi_str, fmt)
+                        dt_fe = datetime.utcnow()
+                        if raw_fe:
+                            fe_str = str(raw_fe).replace("T", " ").split(".")[0]
+                            fmt_e = "%Y-%m-%d %H:%M:%S" if " " in fe_str else "%Y-%m-%d"
+                            dt_fe = datetime.strptime(fe_str, fmt_e)
+                        patient_dias_map[pid] = (dt_fe - dt_fi).days
+                    except Exception:
+                        pass
+    except Exception as exc:
+        log.warning("[dashboard-control] Error computing dias_estada (second pass): %s", exc)
     try:
         patients = db.query(Patient.id, Patient.apellido, Patient.nombre, Patient.dni).all()
         for p in patients:
@@ -3150,8 +3351,8 @@ async def get_epc_dashboard_control(
             if p.dni:
                 display = f"{p.dni} - {display}"
             patient_name_map[str(p.id)] = display
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("[dashboard-control] Error loading patient names: %s", exc)
 
     # Total EPCs
     total_epcs = await mongo.epc_docs.count_documents({})
@@ -3323,6 +3524,9 @@ async def get_epc_dashboard_control(
                 "ok_count": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}},
                 "partial_count": {"$sum": {"$cond": [{"$eq": ["$rating", "partial"]}, 1, 0]}},
                 "bad_count": {"$sum": {"$cond": [{"$eq": ["$rating", "bad"]}, 1, 0]}},
+                "omissions_count": {"$sum": {"$cond": [{"$eq": ["$has_omissions", True]}, 1, 0]}},
+                "repetitions_count": {"$sum": {"$cond": [{"$eq": ["$has_repetitions", True]}, 1, 0]}},
+                "confusing_count": {"$sum": {"$cond": [{"$eq": ["$is_confusing", True]}, 1, 0]}},
                 "first_evaluation": {"$min": "$created_at"},
                 "last_evaluation": {"$max": "$created_at"},
             }
@@ -3365,6 +3569,7 @@ async def get_epc_dashboard_control(
         # Buscar nombre de paciente
         patient_name = None
         epc_created = None
+        pid = None
         if epc_id:
             epc_doc = await mongo.epc_docs.find_one(
                 {"_id": epc_id},
@@ -3382,6 +3587,8 @@ async def get_epc_dashboard_control(
         evaluators_list = sorted(evaluators)
 
         by_epc_map[epc_id] = len(by_epc)
+        # Get dias_internacion from SQL admissions via patient_id
+        dias_estada = patient_dias_map.get(pid) if pid else None
         by_epc.append({
             "epc_id": epc_id,
             "patient_name": patient_name or epc_id[:12] + "..." if epc_id else "—",
@@ -3392,6 +3599,10 @@ async def get_epc_dashboard_control(
             "partial_count": doc["partial_count"],
             "bad_count": doc["bad_count"],
             "ok_pct": ok_pct,
+            "omissions_count": doc.get("omissions_count", 0),
+            "repetitions_count": doc.get("repetitions_count", 0),
+            "confusing_count": doc.get("confusing_count", 0),
+            "dias_internacion": dias_estada,
             "epc_created": epc_created.isoformat() if epc_created else None,
             "first_evaluation": doc["first_evaluation"].isoformat() if doc.get("first_evaluation") else None,
             "last_evaluation": doc["last_evaluation"].isoformat() if doc.get("last_evaluation") else None,
@@ -3408,6 +3619,18 @@ async def get_epc_dashboard_control(
                 "ok_count": {"$sum": {"$cond": [{"$eq": ["$rating", "ok"]}, 1, 0]}},
                 "partial_count": {"$sum": {"$cond": [{"$eq": ["$rating", "partial"]}, 1, 0]}},
                 "bad_count": {"$sum": {"$cond": [{"$eq": ["$rating", "bad"]}, 1, 0]}},
+                "omissions_count": {"$sum": {"$cond": [{"$eq": ["$has_omissions", True]}, 1, 0]}},
+                "repetitions_count": {"$sum": {"$cond": [{"$eq": ["$has_repetitions", True]}, 1, 0]}},
+                "confusing_count": {"$sum": {"$cond": [{"$eq": ["$is_confusing", True]}, 1, 0]}},
+                "evaluations_detail": {
+                    "$push": {
+                        "section": "$section",
+                        "rating": "$rating",
+                        "has_omissions": "$has_omissions",
+                        "has_repetitions": "$has_repetitions",
+                        "is_confusing": "$is_confusing"
+                    }
+                },
                 "first_evaluation": {"$min": "$created_at"},
                 "last_evaluation": {"$max": "$created_at"},
             }
@@ -3430,6 +3653,7 @@ async def get_epc_dashboard_control(
         # Buscar nombre de paciente y fecha de creación de EPC
         patient_name = None
         epc_created = None
+        pid = None
         if epc_id:
             epc_doc = await mongo.epc_docs.find_one(
                 {"_id": epc_id},
@@ -3439,6 +3663,9 @@ async def get_epc_dashboard_control(
                 pid = str(epc_doc.get("patient_id", ""))
                 patient_name = patient_name_map.get(pid)
                 epc_created = epc_doc.get("created_at")
+
+        # Get dias_internacion from SQL admissions via patient_id
+        dias_estada_ev = patient_dias_map.get(pid) if pid else None
 
         by_epc_evaluator.append({
             "epc_id": epc_id,
@@ -3450,41 +3677,72 @@ async def get_epc_dashboard_control(
             "partial_count": doc["partial_count"],
             "bad_count": doc["bad_count"],
             "ok_pct": ok_pct,
+            "omissions_count": doc.get("omissions_count", 0),
+            "repetitions_count": doc.get("repetitions_count", 0),
+            "confusing_count": doc.get("confusing_count", 0),
+            "evaluations_detail": doc.get("evaluations_detail", []),
+            "dias_internacion": dias_estada_ev,
             "epc_created": epc_created.isoformat() if epc_created else None,
             "first_evaluation": doc["first_evaluation"].isoformat() if doc.get("first_evaluation") else None,
             "last_evaluation": doc["last_evaluation"].isoformat() if doc.get("last_evaluation") else None,
         })
 
-    # Add validator-only entries (users who validated but didn't submit section feedback)
+    # Add validator-only entries copying data from real evaluator on same EPC
+    # Build lookup: epc_id -> first real evaluator row data
+    epc_real_evaluator: Dict[str, dict] = {}
+    for row in by_epc_evaluator:
+        eid = row.get("epc_id")
+        if eid and eid not in epc_real_evaluator and row.get("total_evaluations", 0) > 0:
+            epc_real_evaluator[eid] = row
+
     for val_epc_id, validators in epc_validators.items():
         for vname in validators:
             if (val_epc_id, vname) not in existing_eval_combos:
-                # This validator has no section feedback — add as validator-only entry
+                # Look for a real evaluator on this EPC to copy data from
+                real = epc_real_evaluator.get(val_epc_id)
+
                 patient_name = None
                 epc_created = None
-                epc_doc = await mongo.epc_docs.find_one(
-                    {"_id": val_epc_id},
-                    {"patient_id": 1, "created_at": 1}
-                )
-                if epc_doc:
-                    pid = str(epc_doc.get("patient_id", ""))
-                    patient_name = patient_name_map.get(pid)
-                    epc_created = epc_doc.get("created_at")
+                dias_estada_val = None
+                pid_val = None
+
+                if real:
+                    # Copy from the real evaluator
+                    patient_name = real.get("patient_name")
+                    epc_created = real.get("epc_created")
+                    dias_estada_val = real.get("dias_internacion")
+                else:
+                    epc_doc = await mongo.epc_docs.find_one(
+                        {"_id": val_epc_id},
+                        {"patient_id": 1, "created_at": 1}
+                    )
+                    if epc_doc:
+                        pid_val = str(epc_doc.get("patient_id", ""))
+                        patient_name = patient_name_map.get(pid_val)
+                        epc_created = epc_doc.get("created_at")
+                        if epc_created and hasattr(epc_created, "isoformat"):
+                            epc_created = epc_created.isoformat()
+                        dias_estada_val = patient_dias_map.get(pid_val)
 
                 val_date = epc_validator_dates.get(val_epc_id, {}).get(vname)
                 by_epc_evaluator.append({
                     "epc_id": val_epc_id,
-                    "patient_name": patient_name or val_epc_id[:12] + "..." if val_epc_id else "—",
-                    "evaluator_name": f"{vname} (validador)",
+                    "patient_name": patient_name or (val_epc_id[:12] + "..." if val_epc_id else "—"),
+                    "evaluator_name": vname,
                     "evaluator_id": None,
-                    "total_evaluations": 0,
-                    "ok_count": 0,
-                    "partial_count": 0,
-                    "bad_count": 0,
-                    "ok_pct": 0,
-                    "epc_created": epc_created.isoformat() if epc_created else None,
-                    "first_evaluation": val_date.isoformat() if val_date else None,
-                    "last_evaluation": val_date.isoformat() if val_date else None,
+                    "total_evaluations": real["total_evaluations"] if real else 0,
+                    "ok_count": real["ok_count"] if real else 0,
+                    "partial_count": real["partial_count"] if real else 0,
+                    "bad_count": real["bad_count"] if real else 0,
+                    "ok_pct": real["ok_pct"] if real else 0,
+                    "omissions_count": real.get("omissions_count", 0) if real else 0,
+                    "repetitions_count": real.get("repetitions_count", 0) if real else 0,
+                    "confusing_count": real.get("confusing_count", 0) if real else 0,
+                    "evaluations_detail": real.get("evaluations_detail", []) if real else [],
+                    "dias_internacion": dias_estada_val,
+                    "epc_created": epc_created,
+                    "first_evaluation": val_date.isoformat() if val_date else (real.get("first_evaluation") if real else None),
+                    "last_evaluation": val_date.isoformat() if val_date else (real.get("last_evaluation") if real else None),
                 })
 
                 # Also make sure this EPC is in by_epc (it might not be if it has no feedback)
@@ -3501,7 +3759,11 @@ async def get_epc_dashboard_control(
                         "partial_count": 0,
                         "bad_count": 0,
                         "ok_pct": 0,
-                        "epc_created": epc_created.isoformat() if epc_created else None,
+                        "omissions_count": 0,
+                        "repetitions_count": 0,
+                        "confusing_count": 0,
+                        "dias_internacion": dias_estada_val,
+                        "epc_created": epc_created.isoformat() if epc_created and hasattr(epc_created, "isoformat") else epc_created,
                         "first_evaluation": val_date.isoformat() if val_date else None,
                         "last_evaluation": val_date.isoformat() if val_date else None,
                     })

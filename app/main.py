@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.core.config import settings
 from app.adapters.mongo_client import ensure_indexes, ping
+
+# Rate limiter (shared instance used by routers via app.state.limiter)
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
 from app.routers import (
     auth,
@@ -33,18 +40,40 @@ from app.routers.external import router as external_router
 # ✅ NUEVO: middleware de tenant
 from app.core.tenant import TenantContextMiddleware
 
+# ✅ Request ID middleware (traceability)
+from app.core.request_id import RequestIDMiddleware
 
-app = FastAPI(title="EPC Suite", version="3.0.0")  # FERRO D2 v3.0.0
 
-# Middleware de tenant (antes de CORS)
+_docs_kwargs = (
+    {}
+    if settings.ENV != "prod"
+    else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+)
+app = FastAPI(title="EPC Suite", version="3.0.0", **_docs_kwargs)  # FERRO D2 v3.0.0
+
+# Rate limiter (attached to app state for use in routers)
+app.state.limiter = limiter
+app.add_exception_handler(
+    RateLimitExceeded,
+    lambda req, exc: JSONResponse(
+        status_code=429,
+        content={"detail": "Demasiadas solicitudes. Intente de nuevo en unos segundos."},
+    ),
+)
+
+# Middleware stack (outermost runs first — order matters):
+# 1. RequestID   → assigns trace ID
+# 2. Tenant      → resolves tenant context
+# 3. CORS        → handles cross-origin
+app.add_middleware(RequestIDMiddleware)
 app.add_middleware(TenantContextMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,  # ya parseado desde .env
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
 
 # Routers

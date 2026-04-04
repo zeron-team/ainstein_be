@@ -2,8 +2,9 @@
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
+from app.core.deps import get_current_user, role_required
 from app.services.ingest_service import ingest_document
 
 router = APIRouter(prefix="/api", tags=["ingest"])
@@ -14,6 +15,7 @@ async def ingest_endpoint(
     payload: Dict[str, Any] = Body(...),
     max_historia: int = Query(40, ge=1, le=200),
     return_normalized: bool = Query(False),
+    user=Depends(role_required("medico", "admin")),
 ):
     """
     Recibe un JSON (payload), lo normaliza y devuelve metadata.

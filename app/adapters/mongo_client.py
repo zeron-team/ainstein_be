@@ -159,6 +159,20 @@ async def ensure_indexes() -> None:
     llm_usage = db["llm_usage"]
     await ensure_index(llm_usage, [("timestamp", 1)], name="ix_llm_usage_ttl", expireAfterSeconds=7776000)
     
-    # Feedback logs - 60 days retention
+    # EPC Feedback — PERMANENT storage, NO TTL (data must NEVER expire)
     epc_feedback = db["epc_feedback"]
-    await ensure_index(epc_feedback, [("created_at", 1)], name="ix_epc_feedback_ttl", expireAfterSeconds=5184000)
+    # Drop any existing TTL index that was auto-deleting data
+    try:
+        existing_indexes = await epc_feedback.list_indexes().to_list(length=None)
+        for idx in existing_indexes:
+            if idx.get("expireAfterSeconds") is not None and "created_at" in dict(idx.get("key", {})):
+                await epc_feedback.drop_index(idx["name"])
+    except Exception:
+        pass
+    await ensure_index(epc_feedback, [("created_at", -1)], name="ix_epc_feedback_created")
+    await ensure_index(epc_feedback, [("epc_id", 1), ("created_by", 1)], name="ix_epc_feedback_epc_user")
+
+    # EPC Feedback Archive — PERMANENT storage for historical data
+    epc_feedback_archive = db["epc_feedback_archive"]
+    await ensure_index(epc_feedback_archive, [("archived_at", -1)], name="ix_epc_fb_archive_at")
+    await ensure_index(epc_feedback_archive, [("epc_id", 1)], name="ix_epc_fb_archive_epc")

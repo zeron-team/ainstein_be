@@ -95,6 +95,60 @@ def _is_lab_item(text: str) -> bool:
     return any(kw in t for kw in _LAB_KEYWORDS_GLOBAL)
 
 
+def _group_studies_by_name(studies: list) -> list:
+    """
+    REGLA DE ORO - Estudios: Agrupar estudios repetidos por nombre, consolidando fechas.
+    
+    Entrada:  ["TC tórax (11/03/2026)", "TC tórax (12/03/2026)", "Eco abdominal (11/03/2026)"]
+    Salida:   ["TC tórax (11/03/2026, 12/03/2026)", "Eco abdominal (11/03/2026)"]
+    """
+    if not studies:
+        return studies
+    
+    from collections import OrderedDict
+    agrupados = OrderedDict()
+    
+    for est in studies:
+        if not isinstance(est, str):
+            continue
+        
+        # Extraer fecha(s) del final: "Nombre (dd/mm/yyyy)" o "Nombre (dd/mm/yyyy, dd/mm/yyyy)"
+        fechas_match = re.search(r'\(([^)]+)\)\s*$', est)
+        if fechas_match:
+            nombre = re.sub(r'\s*\([^)]*\)\s*$', '', est).strip()
+            fechas_raw = fechas_match.group(1)
+            # Puede haber múltiples fechas ya consolidadas
+            fechas = [f.strip() for f in fechas_raw.split(',') if re.match(r'\d{1,2}/\d{1,2}/\d{2,4}', f.strip())]
+        else:
+            nombre = est.strip()
+            fechas = []
+        
+        # Normalizar nombre para agrupar (case-insensitive, sin acentos extras)
+        nombre_key = nombre.lower().strip()
+        
+        if nombre_key not in agrupados:
+            agrupados[nombre_key] = {"nombre": nombre, "fechas": []}
+        
+        for f in fechas:
+            if f not in agrupados[nombre_key]["fechas"]:
+                agrupados[nombre_key]["fechas"].append(f)
+    
+    # Construir lista final
+    resultado = []
+    for entry in agrupados.values():
+        if entry["fechas"]:
+            try:
+                from datetime import datetime
+                fechas_ord = sorted(entry["fechas"], key=lambda f: datetime.strptime(f, "%d/%m/%Y"))
+            except:
+                fechas_ord = entry["fechas"]
+            resultado.append(f"{entry['nombre']} ({', '.join(fechas_ord)})")
+        else:
+            resultado.append(entry["nombre"])
+    
+    return resultado
+
+
 
 def _medical_title_case(text: str) -> str:
     """
@@ -1116,11 +1170,6 @@ def extract_studies_chronologically(
         # Intervencionismos cardíacos
         "ABLACION", "ABLACIÓN",  # ⚠️ Ablación por catéter = procedimiento intervencionista
         "CATETERISMO", "HEMODINAMIA",
-        # Endoscopías → van a PROCEDIMIENTOS (son invasivas)
-        "VEDA", "VIDEOENDOSCOPIA", "ENDOSCOPIA DIGESTIVA ALTA",
-        "COLONOSCOPIA", "VCC", "VIDEOCOLONOSCOPIA",
-        "CPRE", "COLANGIOPANCREATOGRAFIA",
-        "BRONCOSCOPIA", "FIBROBRONCOSCOPIA",
         # Accesos/Dispositivos
         "CVC", "VIA CENTRAL", "PICC", "INTUBACION", "IOT",
         # Terapéuticos invasivos
@@ -1297,6 +1346,8 @@ async def generate_epc_from_json(
     
     # 3b. Extraer ESTUDIOS diagnósticos (TAC, RMN, RX, etc.) - nueva sección
     sorted_studies = extract_studies_chronologically(parsed["procedimientos"], excluded_sections)
+    # REGLA DE ORO: Agrupar estudios repetidos por nombre con fechas consolidadas
+    sorted_studies = _group_studies_by_name(sorted_studies)
     
     # 3c. Extraer LABORATORIOS individuales para modal "Otros Datos de Interés"
     lab_procedures = extract_lab_procedures(parsed["procedimientos"])
@@ -1353,7 +1404,7 @@ async def generate_epc_from_json(
         tipo_alta_texto = tipo_alta if tipo_alta else "ALTA"
         es_obito_confirmado = es_obito_por_alta
         
-        prompt = f"""Eres un médico especialista redactando la sección EVOLUCIÓN de una epicrisis.
+        prompt_narrador = f"""Eres un médico especialista redactando la sección EVOLUCIÓN de una epicrisis.
 
 DATOS DEL CASO:
 - PACIENTE: {paciente_info if paciente_info else 'No especificado'}
@@ -1409,46 +1460,212 @@ REGLAS DE ESTILO:
 8. La frase "DESENLACE: ÓBITO" debe aparecer EXACTAMENTE UNA VEZ, como última línea del texto
 9. El texto debe ser narrativo continuo en párrafos, sin encabezados ni separadores
 
-Responde SOLO con el texto de evolución en formato JSON:
-{{"evolucion_medica": "..."}}
+Responde SOLO con el siguiente formato JSON:
+{{
+  "evolucion_medica": "..."
+}}
+"""
+
+        prompt_extractor = f"""Eres un médico especialista y minero de datos clínicos (Extractor Estricto).
+Tu ÚNICA función es extraer Procedimientos, Estudios e Interconsultas de la Historia Clínica.
+
+DATOS DEL CASO:
+- PACIENTE: {paciente_info if paciente_info else 'No especificado'}
+- MOTIVO INTERNACIÓN: {motivo if motivo else 'No especificado'}
+
+EVOLUCIONES MÉDICAS REGISTRADAS:
+{context}
+
+═══════════════════════════════════════════════════════════════
+REGLAS DE CLASIFICACIÓN ESTRICTAS (MÁXIMA PRIORIDAD)
+═══════════════════════════════════════════════════════════════
+
+▶ "procedimientos_completos": Cirugías, punciones (punción lumbar, toracocentesis), colocación de catéteres (CVC, sonda vesical, SNG), intubación orotraqueal, drenajes, biopsias, transfusiones, diálisis, cardioversión. Formato: SOLO "Nombre del procedimiento (Fecha)". NO incluir detalles, técnicas ni descripciones.
+
+▶ "estudios_completos": SOLO estudios por IMÁGENES y FUNCIONALES:
+  - INCLUIR: Tomografía (TC/TAC), Resonancia (RMN), Radiografía (Rx), Ecografía, Ecocardiograma, Electrocardiograma (ECG), Electroencefalograma (EEG), PET, SPECT, Centellograma, Espirometría, Endoscopía (VEDA/VCC), Angiografía
+  - Formato: SOLO "Nombre del estudio (Fecha)". NO incluir hallazgos, resultados ni descripciones.
+  - ⛔ NO INCLUIR NUNCA: Laboratorios, hemogramas, bioquímicas, ionogramas, hepatogramas, hemocultivos, urocultivos, cultivos de LCR, serologías, PCR, gases en sangre, coagulogramas, determinaciones hormonales, vitaminas, marcadores tumorales, orina completa, glucemia, creatinina, uremia. TODO ESO VA EN LABORATORIO, NO AQUÍ.
+
+▶ "interconsultas_completas": Especialidades médicas consultadas. Formato: "Especialidad"
+
+- Si no encuentras items, devuelve listas vacías [].
+
+Responde SOLO con el siguiente formato JSON:
+{{
+  "procedimientos_completos": ["Nombre del procedimiento (Fecha)"],
+  "estudios_completos": ["Nombre del estudio (Fecha)"],
+  "interconsultas_completas": ["Especialidad"]
+}}
 """
         
+        # 🏆 Inyectar Golden Rules a AMBOS prompts
         try:
-            result = await ai.generate_epc(prompt)
-            print(f"[EPC-JSON] Respuesta IA tipo: {type(result)}, keys: {result.keys() if isinstance(result, dict) else 'N/A'}")
+            from app.services.golden_rules_service import get_golden_rules_for_prompt
+            golden_rules = await get_golden_rules_for_prompt()
+            if golden_rules:
+                prompt_narrador = golden_rules + "\n\n" + prompt_narrador
+                prompt_extractor = golden_rules + "\n\n" + prompt_extractor
+                print(f"[EPC-JSON] Golden Rules injected into Swarm prompts: {len(golden_rules)} chars")
+        except Exception as e:
+            print(f"[EPC-JSON] Could not load Golden Rules: {e}")
+        
+        try:
+            import asyncio
+            result_flags_ai_procs = False
+            print("[EPC-JSON] 🚀 Lanzando Swarm Multi-Agente (Narrador + Extractor) en paralelo...")
+            
+            tarea_narrador = ai.generate_epc(prompt_narrador)
+            tarea_extractor = ai.generate_epc(prompt_extractor)
+            
+            result_narrador, result_extractor = await asyncio.gather(tarea_narrador, tarea_extractor)
+            
+            print(f"[EPC-JSON] Respuestas Swarm recibidas. Narrador: {type(result_narrador)}, Extractor: {type(result_extractor)}")
             
             evolucion = ""
+            interconsultas_formatted = extract_interconsultas_chronologically(parsed.get("interconsultas", []))
             
-            if isinstance(result, dict):
-                # Estructura real: {'json': {'evolucion_epicrisis': '...'}, '_provider': '...'}
-                json_content = result.get("json", {})
-                if isinstance(json_content, dict):
-                    evolucion = (
-                        json_content.get("evolucion_epicrisis") or
-                        json_content.get("evolucion_medica") or
-                        json_content.get("evolucion") or
-                        json_content.get("text") or
-                        ""
-                    )
-                
-                # Si no encontramos en json, buscar en el nivel superior
-                if not evolucion:
-                    evolucion = (
-                        result.get("raw_text") or 
-                        result.get("evolucion") or
-                        result.get("evolucion_medica") or
-                        result.get("evolucion_epicrisis") or
-                        result.get("text") or
-                        ""
-                    )
-                
-                # Limpiar markdown si hay
-                if isinstance(evolucion, str) and "```" in evolucion:
-                    evolucion = re.sub(r"```[a-z]*\s*", "", evolucion)
-                    evolucion = evolucion.replace("```", "")
+            json_content = {}
+            
+            # ── NARRADOR ──
+            if isinstance(result_narrador, dict):
+                narr_json = result_narrador.get("json")
+                if isinstance(narr_json, dict):
+                    json_content.update(narr_json)
+                    print(f"[EPC-JSON] Narrador JSON OK: keys={list(narr_json.keys())}")
+                elif result_narrador.get("raw_text"):
+                    raw_narr = result_narrador["raw_text"]
+                    print(f"[EPC-JSON] Narrador: _safe_json falló, intentando parse manual del raw_text ({len(raw_narr)} chars)")
+                    try:
+                        clean = re.sub(r'[\x00-\x1F]+', ' ', raw_narr)
+                        clean = re.sub(r'```(?:json)?\s*', '', clean)
+                        clean = clean.replace('```', '').strip()
+                        narr_parsed = json.loads(clean)
+                        if isinstance(narr_parsed, dict):
+                            json_content.update(narr_parsed)
+                            print(f"[EPC-JSON] Narrador parse manual OK: keys={list(narr_parsed.keys())}")
+                    except Exception as e:
+                        print(f"[EPC-JSON] Narrador parse manual falló: {e}")
+                    json_content["raw_text_narrador"] = raw_narr
                     
-            elif isinstance(result, str):
-                evolucion = result
+            # ── EXTRACTOR ──
+            if isinstance(result_extractor, dict):
+                ext_json = result_extractor.get("json")
+                if isinstance(ext_json, dict):
+                    json_content.update(ext_json)
+                    print(f"[EPC-JSON] Extractor JSON OK: keys={list(ext_json.keys())}, estudios={len(ext_json.get('estudios_completos', []))}, procs={len(ext_json.get('procedimientos_completos', []))}")
+                elif result_extractor.get("raw_text"):
+                    raw_ext = result_extractor["raw_text"]
+                    print(f"[EPC-JSON] Extractor: _safe_json falló, intentando parse manual del raw_text ({len(raw_ext)} chars)")
+                    print(f"[EPC-JSON] Extractor raw_text preview: {raw_ext[:300]}")
+                    try:
+                        clean = re.sub(r'[\x00-\x1F]+', ' ', raw_ext)
+                        clean = re.sub(r'```(?:json)?\s*', '', clean)
+                        clean = clean.replace('```', '').strip()
+                        ext_parsed = json.loads(clean)
+                        if isinstance(ext_parsed, dict):
+                            json_content.update(ext_parsed)
+                            print(f"[EPC-JSON] Extractor parse manual OK: estudios={len(ext_parsed.get('estudios_completos', []))}, procs={len(ext_parsed.get('procedimientos_completos', []))}")
+                    except Exception as e:
+                        print(f"[EPC-JSON] Extractor parse manual falló: {e}, extrayendo listas con regex...")
+                        # ═══ REGEX EXTRACTION DIRECTA del raw_text truncado ═══
+                        clean_ext = re.sub(r'[\x00-\x1F]+', ' ', raw_ext)
+                        
+                        # Extraer estudios_completos
+                        est_match = re.search(r'"estudios_completos"\s*:\s*\[(.*?)(?:\]|$)', clean_ext, re.DOTALL)
+                        if est_match:
+                            items = re.findall(r'"((?:[^"\\]|\\.)*)"', est_match.group(1))
+                            items_clean = [it for it in items if len(it.strip()) > 3]
+                            if items_clean:
+                                json_content["estudios_completos"] = items_clean
+                                print(f"[EPC-JSON] ✅ Regex extrajo {len(items_clean)} estudios del Extractor truncado")
+                        
+                        # Extraer procedimientos_completos
+                        proc_match = re.search(r'"procedimientos_completos"\s*:\s*\[(.*?)(?:\]|$)', clean_ext, re.DOTALL)
+                        if proc_match:
+                            items = re.findall(r'"((?:[^"\\]|\\.)*)"', proc_match.group(1))
+                            items_clean = [it for it in items if len(it.strip()) > 3]
+                            if items_clean:
+                                json_content["procedimientos_completos"] = items_clean
+                                print(f"[EPC-JSON] ✅ Regex extrajo {len(items_clean)} procedimientos del Extractor truncado")
+                        
+                        # Extraer interconsultas_completas
+                        ic_match = re.search(r'"interconsultas_completas"\s*:\s*\[(.*?)(?:\]|$)', clean_ext, re.DOTALL)
+                        if ic_match:
+                            items = re.findall(r'"((?:[^"\\]|\\.)*)"', ic_match.group(1))
+                            items_clean = [it for it in items if len(it.strip()) > 2]
+                            if items_clean:
+                                json_content["interconsultas_completas"] = items_clean
+                                print(f"[EPC-JSON] ✅ Regex extrajo {len(items_clean)} interconsultas del Extractor truncado")
+                        
+                    json_content["raw_text_extractor"] = raw_ext
+                else:
+                    print(f"[EPC-JSON] ⚠️ Extractor devolvió dict sin json ni raw_text. Keys: {list(result_extractor.keys())}")
+
+            # Ahora extraemos la EVOLUCIÓN
+            evolucion = (
+                json_content.get("evolucion_epicrisis") or
+                json_content.get("evolucion_medica") or
+                json_content.get("evolucion") or
+                str(json_content.get("raw_text_narrador", "")) or
+                ""
+            )
+
+            # Limpiar markdown si hay
+            if isinstance(evolucion, str) and "```" in evolucion:
+                evolucion = re.sub(r"```[a-z]*\s*", "", evolucion)
+                evolucion = evolucion.replace("```", "")
+                
+            # Extraer estudios e interconsultas completos (FASE 2 EXTRACTOR)
+            if isinstance(json_content, dict):
+                estudios_extra = json_content.get("estudios_completos", [])
+                procs_extra = json_content.get("procedimientos_completos", [])
+                ic_extra = json_content.get("interconsultas_completas", [])
+                
+                print(f"[EPC-JSON] Extractor retornó -> Estudios: {len(estudios_extra) if isinstance(estudios_extra, list) else 0}, Procedimientos: {len(procs_extra) if isinstance(procs_extra, list) else 0}")
+                
+                if isinstance(estudios_extra, list) and len(estudios_extra) > 0:
+                    # Filtrar: remover vacíos Y remover laboratorios que el LLM clasificó mal
+                    estudios_extra_limpios = [
+                        est for est in estudios_extra 
+                        if isinstance(est, str) and len(est.strip()) > 3 and not _is_lab_item(est)
+                    ]
+                    labs_filtrados = len(estudios_extra) - len(estudios_extra_limpios)
+                    if labs_filtrados > 0:
+                        print(f"[EPC-JSON] ⚠️ Filtrados {labs_filtrados} laboratorios de estudios_completos (safety net)")
+                    if estudios_extra_limpios:
+                        # Strip hallazgos: solo mantener "Nombre del estudio (Fecha)"
+                        estudios_solo_nombre = []
+                        for est in estudios_extra_limpios:
+                            clean = re.split(r'\s*-\s+(?:HALLAZGOS|Hallazgos|hallazgos|Resultado|resultado|Conclusi)', est)[0]
+                            clean = re.split(r'\s+-\s+', clean, maxsplit=1)[0]
+                            estudios_solo_nombre.append(clean.strip())
+                        
+                        # REGLA DE ORO: Agrupar estudios repetidos con fechas consolidadas
+                        sorted_studies = _group_studies_by_name(estudios_solo_nombre)
+                        print(f"[EPC-JSON] Estudios agrupados: {len(estudios_solo_nombre)} → {len(sorted_studies)} estudios únicos")
+
+                if isinstance(procs_extra, list) and len(procs_extra) > 0:
+                    procs_extra_limpios = [proc[0].upper() + proc[1:] for proc in procs_extra if isinstance(proc, str) and len(proc.strip()) > 3]
+                    if procs_extra_limpios:
+                        # Strip detalles después de la fecha: solo "Nombre (Fecha)"
+                        sorted_procs = []
+                        for proc in procs_extra_limpios:
+                            # Remove everything after "(dd/mm/yyyy)" 
+                            clean = re.sub(r'(\(\d{1,2}/\d{1,2}/\d{4}\))\s*[-–—].*$', r'\1', proc).strip()
+                            # Also strip " - DETALLE" if no date
+                            clean = re.split(r'\s+[-–—]\s+', clean, maxsplit=1)[0].strip()
+                            sorted_procs.append(clean)
+                        result_flags_ai_procs = True
+                        print(f"[EPC-JSON] ✅ sorted_procs SETEADO con {len(sorted_procs)} procs del LLM: {sorted_procs[:3]}")
+                    else:
+                        print(f"[EPC-JSON] ⚠️ procs_extra tenía {len(procs_extra)} items pero todos fueron filtrados")
+                else:
+                    print(f"[EPC-JSON] ⚠️ procs_extra está vacío o no es lista: type={type(procs_extra)}, len={len(procs_extra) if isinstance(procs_extra, list) else 'N/A'}")
+                if isinstance(ic_extra, list):
+                    for ic in ic_extra:
+                        if isinstance(ic, str) and len(ic.strip()) > 2 and ic not in interconsultas_formatted:
+                            interconsultas_formatted.append(ic)
             
             if not isinstance(evolucion, str):
                 evolucion = str(evolucion) if evolucion else ""
@@ -1459,10 +1676,28 @@ Responde SOLO con el texto de evolución en formato JSON:
             # Limpiar si todavía es JSON string o tiene formato JSON
             if evolucion.startswith("{") or ('"evolucion' in evolucion):
                 try:
-                    import json
+                    # Limpiar caracteres de control espurios antes de parsear
+                    # (Ej: saltos de línea literales generados por la IA dentro de los strings)
+                    clean_evo = re.sub(r'[\x00-\x1F]+', ' ', evolucion)
                     # Intentar parsear JSON limpio
-                    parsed_json = json.loads(evolucion)
+                    parsed_json = json.loads(clean_evo)
                     if isinstance(parsed_json, dict):
+                        # Re-extraer también las listas en este punto, por si _safe_json falló!
+                        if not sorted_studies:
+                            est_extra = parsed_json.get("estudios_completos", [])
+                            if isinstance(est_extra, list):
+                                sorted_studies = [e for e in est_extra if isinstance(e, str) and len(e.strip()) > 3]
+                        if not sorted_procs:
+                            proc_extra = parsed_json.get("procedimientos_completos", [])
+                            if isinstance(proc_extra, list):
+                                sorted_procs = [p[0].upper() + p[1:] for p in proc_extra if isinstance(p, str) and len(p.strip()) > 3]
+                        
+                        ic_extra = parsed_json.get("interconsultas_completas", [])
+                        if isinstance(ic_extra, list):
+                            for ic in ic_extra:
+                                if isinstance(ic, str) and len(ic.strip()) > 2 and ic not in interconsultas_formatted:
+                                    interconsultas_formatted.append(ic)
+                        
                         evolucion = (
                             parsed_json.get("evolucion_medica") or 
                             parsed_json.get("evolucion") or
@@ -1485,6 +1720,28 @@ Responde SOLO con el texto de evolución en formato JSON:
                         evolucion = re.sub(r'^[{\s]*"evolucion(?:_medica)?"\s*:\s*"?', '', evolucion)
                         evolucion = re.sub(r'"?\s*[}]*$', '', evolucion)
                         print(f"[EPC-JSON] Limpiado manualmente: {evolucion[:100]}...")
+                        
+                    # Extraer listas extra utilizando regex rudimentario por si se truncó el JSON del Extractor
+                    raw_extractor = json_content.get("raw_text_extractor", "")
+                    if raw_extractor:
+                        clean_ext = re.sub(r'[\x00-\x1F]+', ' ', raw_extractor)
+                        
+                        if not sorted_studies:
+                            estudios_match = re.search(r'"estudios_completos"\s*:\s*\[(.*?)\]?(?:\}$|,|$)', clean_ext, re.DOTALL)
+                            if estudios_match:
+                                items_str = estudios_match.group(1)
+                                items = [m.strip(' "\'') for m in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"?', items_str)]
+                                if items:
+                                    sorted_studies = [e for e in items if len(e.strip()) > 3]
+                        
+                        if not sorted_procs:
+                            procs_match = re.search(r'"procedimientos_completos"\s*:\s*\[(.*?)\]?(?:\}$|,|$)', clean_ext, re.DOTALL)
+                            if procs_match:
+                                items_str = procs_match.group(1)
+                                items = [m.strip(' "\'') for m in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"?', items_str)]
+                                if items:
+                                    sorted_procs = [p[0].upper() + p[1:] for p in items if len(p.strip()) > 3]
+
             
             # Limpiar caracteres de control y normalizar espacios
             evolucion = evolucion.replace("\\n", "\n").replace('\\"', '"')
@@ -1507,12 +1764,10 @@ Responde SOLO con el texto de evolución en formato JSON:
     
     # 5. Construir diagnóstico principal
     diagnostico = parsed["diagnosticos"][0] if parsed["diagnosticos"] else ""
-    
     # 6. Formatear interconsultas - AGRUPADAS POR ESPECIALIDAD
-    # Usar función de agrupación que muestra solo primera fecha de cada especialidad
-    interconsultas_formatted = extract_interconsultas_chronologically(parsed["interconsultas"])
+    # (Ya inicializadas al principio por extracciones LLM)
     
-    # 7. Construir resultado final
+    print(f"[EPC-JSON] 📊 RESULTADO FINAL: procs={len(sorted_procs)}, studies={len(sorted_studies)}, ics={len(interconsultas_formatted)}")
     result = {
         "motivo_internacion": motivo,
         "diagnostico_principal_cie10": diagnostico,
@@ -1526,6 +1781,7 @@ Responde SOLO con el texto de evolución en formato JSON:
         "indicaciones_alta": [],
         "notas_alta": [],
         "_generated_by": "json_parser",
+        "_ai_generated_procs": result_flags_ai_procs,
         "_meds_count": len(sorted_meds),
         "_procs_count": len(sorted_procs),
         "_studies_count": len(sorted_studies),
@@ -1609,7 +1865,7 @@ Responde SOLO con el texto de evolución en formato JSON:
     # 7c. AI FALLBACK: Solo para estudios e interconsultas vacías (raro)
     # =========================================================================
     secciones_vacias_no_procs = (
-        not sorted_studies and
+        not sorted_studies or
         not interconsultas_formatted
     )
     
@@ -1673,11 +1929,15 @@ Responde SOLO con JSON válido:
     # Si el LLM no aplicó la regla, la aplicamos aquí
     try:
         from app.services.ai_langchain_service import _post_process_epc_result, _load_section_dictionary
+        procs_before_pp = len(result.get("procedimientos", []))
         dictionary_rules = await _load_section_dictionary()
         result = _post_process_epc_result(result, dictionary_rules=dictionary_rules)
-        log.info("[EPC-JSON] Applied death rule post-processing (%d dictionary rules)", len(dictionary_rules))
+        procs_after_pp = len(result.get("procedimientos", []))
+        print(f"[EPC-JSON] POST-PROCESS: procs ANTES={procs_before_pp}, procs DESPUES={procs_after_pp}, dict_rules={len(dictionary_rules)}")
+        if procs_before_pp > 0 and procs_after_pp == 0:
+            print(f"[EPC-JSON] ⛔⛔⛔ POST-PROCESS BORRÓ TODOS LOS PROCEDIMIENTOS!")
     except Exception as e:
-        log.warning(f"[EPC-JSON] Could not apply post-processing: {e}")
+        print(f"[EPC-JSON] Could not apply post-processing: {e}")
     
     # =========================================================================
     # 9. ⛔ REGLA: Si taltDescripcion es OBITO, verificar contra texto

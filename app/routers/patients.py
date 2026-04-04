@@ -196,10 +196,10 @@ async def parse_hce_for_patient_data(file: UploadFile = File(...)):
         return ai_extracted_data
 
     except Exception as e:
-        # log.error(f"Error parsing HCE file: {e}", exc_info=True)
+        log.error("Error parsing HCE file: %s", e, exc_info=True)
         raise HTTPException(
             status_code=400,
-            detail=f"No se pudo parsear el archivo PDF. Error: {e}",
+            detail="No se pudo parsear el archivo PDF.",
         )
 
 # ---------------------------
@@ -290,9 +290,8 @@ async def import_patient_from_hce(
             message="Paciente importado desde HCE",
         )
     except Exception as e:
-        # Log the full error for debugging
-        # log.error(f"Error processing HCE file: {e}", exc_info=True)
+        log.error("Error processing HCE file: %s", e, exc_info=True)
         raise HTTPException(
             status_code=400,
-            detail=f"No se pudo procesar el archivo PDF. Error: {e}",
+            detail="No se pudo procesar el archivo PDF.",
         )

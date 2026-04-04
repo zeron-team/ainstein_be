@@ -13,14 +13,37 @@ log = logging.getLogger(__name__)
 
 
 def _safe_json(text: str) -> Optional[Dict[str, Any]]:
-    # Regex to find a JSON object within backticks or just as a block
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```|(\{.*?\})", text, re.DOTALL)
+    """Parse JSON from LLM output, handling markdown fences and control chars."""
+    # Try to find JSON in markdown code blocks first
+    match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if not match:
+        # Fallback: find outermost { ... } using greedy match
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
     if match:
-        # Prioritize the first capturing group (with backticks), fallback to the second
-        json_str = match.group(1) or match.group(2)
+        json_str = match.group(1)
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
+            clean_str = re.sub(r'[\x00-\x1F]+', ' ', json_str)
+            return json.loads(clean_str)
+        except json.JSONDecodeError as e:
+            log.warning(f"Error parseando JSON en _safe_json: {e}")
+            # Try to find a smaller valid JSON if the greedy match was too greedy
+            try:
+                # Find the balanced braces
+                depth = 0
+                start = None
+                for i, c in enumerate(json_str):
+                    if c == '{':
+                        if depth == 0:
+                            start = i
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0 and start is not None:
+                            candidate = json_str[start:i+1]
+                            clean = re.sub(r'[\x00-\x1F]+', ' ', candidate)
+                            return json.loads(clean)
+            except json.JSONDecodeError:
+                pass
             return None
     return None
 

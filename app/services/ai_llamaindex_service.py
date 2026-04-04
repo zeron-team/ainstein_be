@@ -39,6 +39,14 @@ class EPCGeneratedContent(BaseModel):
     diagnostico_principal: Optional[str] = Field(default=None, description="Diagnóstico principal")
     diagnosticos_secundarios: List[str] = Field(default_factory=list, description="Diagnósticos secundarios")
 
+    # Soporte para Extractor Multi-Pass
+    estudios_completos: Optional[List[str]] = Field(default=None)
+    procedimientos_completos: Optional[List[str]] = Field(default=None)
+    interconsultas_completas: Optional[List[str]] = Field(default=None)
+    estudios_adicionales_mencionados: Optional[List[str]] = Field(default=None)
+    procedimientos_adicionales_mencionados: Optional[List[str]] = Field(default=None)
+    interconsultas_adicionales_mencionadas: Optional[List[str]] = Field(default=None)
+
 
 class PatientExtractedData(BaseModel):
     """Esquema de datos extraídos del paciente."""

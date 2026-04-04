@@ -17,4 +17,9 @@ def create_access_token(sub: str, role: str) -> str:
     return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
 
 def decode_token(token: str):
-    return jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+    try:
+        return jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise ValueError("Token expirado")
+    except jwt.InvalidTokenError:
+        raise ValueError("Token inválido")

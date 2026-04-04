@@ -113,12 +113,7 @@ def extract_medications_from_indicaciones(indicaciones_text: str) -> List[Dict[s
         if freq_match:
             frecuencia = freq_match.group(1).strip()
         
-        # Excluir soluciones
-        is_solution = any(sol in farmaco.upper() for sol in [
-            "SOLUCION FISIOLOGICA", "SOLUCION RINGER", "SOLUCION DEXTROSA", "GLUCOSALINA"
-        ])
-        
-        if not is_solution and farmaco:
+        if farmaco:
             medications.append({
                 "tipo": "internacion",
                 "farmaco": farmaco,
@@ -167,12 +162,7 @@ def extract_medications_simple_format(hce_text: str) -> List[Dict[str, Any]]:
             via = ""
             frecuencia = " ".join(line.split()[1:]) if len(line.split()) > 1 else ""
         
-        # Excluir soluciones
-        is_solution = any(sol in farmaco.upper() for sol in [
-            "SOLUCION", "RINGER", "DEXTROSA", "GLUCOSALINA", "PHP"
-        ])
-        
-        if not is_solution and farmaco and len(farmaco) > 2:
+        if farmaco and len(farmaco) > 2:
             medications.append({
                 "tipo": "internacion",
                 "farmaco": farmaco,
@@ -253,13 +243,7 @@ def extract_procedures_from_hce(hce_text: str) -> List[Dict[str, Any]]:
         except:
             fecha_str = fecha_hora
         
-        # Filtrar rutina de enfermería
-        skip_keywords = ["SIGNOS VITALES", "CONTROL", "OBSERVACION", "VALORACION", 
-                        "ADMINISTRACION", "PASE", "HOJA DE ENFERMERIA"]
-        if any(kw in tipo.upper() for kw in skip_keywords):
-            continue
-        if any(kw in descripcion.upper() for kw in skip_keywords):
-            continue
+
         
         key = descripcion.upper()[:50]
         if key not in seen:
@@ -277,10 +261,7 @@ def extract_procedures_from_hce(hce_text: str) -> List[Dict[str, Any]]:
         if not descripcion or len(descripcion) < 5:
             continue
         
-        # Filtrar rutina
-        skip_keywords = ["SIGNOS", "CONTROL", "VALORACION", "PASE"]
-        if any(kw in descripcion.upper() for kw in skip_keywords):
-            continue
+
         
         key = descripcion.upper()[:50]
         if key not in seen:

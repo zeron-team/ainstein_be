@@ -17,6 +17,7 @@ weasyprint
 pdfminer.six
 python-dotenv
 redis>=5.0.0
+slowapi>=0.1.5
 
 # LlamaIndex ecosystem (FERRO D2 v4 - migración desde LangChain)
 llama-index-core>=0.11.0

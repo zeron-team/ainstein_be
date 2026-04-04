@@ -28,15 +28,21 @@ from app.services.hce_parser import (
     parse_hce_text,
 )
 
+import logging
+
+log = logging.getLogger(__name__)
+
 try:
     from app.domain.models import Patient, Admission  # type: ignore
-except Exception:  # pragma: no cover
+except Exception as _exc:  # pragma: no cover
+    log.warning("Could not import Patient/Admission models: %s", _exc)
     Patient = None  # type: ignore
     Admission = None  # type: ignore
 
 try:
     from app.services.ai_gemini_service import GeminiAIService  # type: ignore
-except Exception:  # pragma: no cover
+except Exception as _exc:  # pragma: no cover
+    log.warning("Could not import GeminiAIService: %s", _exc)
     GeminiAIService = None  # type: ignore
 
 router = APIRouter(prefix="/hce", tags=["HCE"])
@@ -208,7 +214,7 @@ def _structured_from_ainstein(episodio: Dict[str, Any], historia: Any) -> Dict[s
 
     # datos mínimos para que quede “internación” y EPC pueda generarse
     structured: Dict[str, Any] = {
-        "paciente_apellido_nombre": f"AINSTEIN,{paci_codigo or 'SIN_CODIGO'}",
+        "paciente_apellido_nombre": f"AINSTEIN,{paci_codigo or 'SIN_PACI'}-{inte_codigo or 'SIN_INTE'}",
         "sexo": episodio.get("paciSexo"),
         "fecha_ingreso": (episodio.get("inteFechaIngreso") or ""),
         "fecha_egreso_original": (episodio.get("inteFechaEgreso") or ""),
@@ -610,9 +616,11 @@ async def import_ainstein_hce(
     if historia is None:
         raise HTTPException(status_code=400, detail="Falta 'historia' en el body.")
 
-    # ✅ patient_id estable si no te lo mandan (evita duplicados por paciCodigo)
+    # ✅ patient_id estable con internación si no te lo mandan (evita sobreescribir entre internaciones)
     if not patient_id and episodio.get("paciCodigo") is not None:
-        patient_id = f"AINSTEIN_{episodio.get('paciCodigo')}"
+        # Se genera con paciCodigo_inteCodigo
+        inte_codigo = episodio.get("inteCodigo", "NA")
+        patient_id = f"AINSTEIN_{episodio.get('paciCodigo')}_{inte_codigo}"
 
     structured = _structured_from_ainstein(episodio, historia)
 
