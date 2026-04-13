@@ -263,24 +263,22 @@ def _extract_ainstein_text(hce_doc: Dict[str, Any]) -> str:
         # Procedimientos
         procedimientos = entrada.get("indicacionProcedimientos") or []
         if procedimientos:
-            proc_texts = [
-                p.get("procDescripcion")
-                for p in procedimientos
-                if isinstance(p, dict) and p.get("procDescripcion")
-            ]
+            from app.services.hce_json_parser import categorize_procedure
+            proc_texts = []
+            for p in procedimientos:
+                if isinstance(p, dict) and p.get("procDescripcion"):
+                    desc = p.get("procDescripcion").strip()
+                    cat = categorize_procedure(desc)
+                    # REGLA ORO: Ocultar si es categoría de enfermería
+                    if cat not in {"control", "higiene", "enfermeria", "valoracion", "medicacion_admin", "valoracion_clinica", "interconsulta"}:
+                        proc_texts.append(desc)
             if proc_texts:
                 entry_parts.append(f"Procedimientos: {', '.join(proc_texts)}")
 
-        # Enfermería
-        enfermeria = entrada.get("indicacionEnfermeria") or []
-        if enfermeria:
-            enf_texts = [
-                e.get("indiDescripcion")
-                for e in enfermeria
-                if isinstance(e, dict) and e.get("indiDescripcion")
-            ]
-            if enf_texts:
-                entry_parts.append(f"Indicaciones enfermería: {', '.join(enf_texts)}")
+        # REGLA DE ORO CORE: NUNCA INCLUIR ENFERMERÍA EN EL CONTEXTO
+        # enfermeria = entrada.get("indicacionEnfermeria") or []
+        # if enfermeria:
+        #    ...
 
         # Plantillas (valores relevantes)
         plantillas = entrada.get("plantillas") or []
@@ -438,6 +436,18 @@ def _actor_name(user: Any) -> str:
                 return str(val)
 
     return "sistema"
+
+
+def _actor_id(user: Any) -> str:
+    """
+    Obtiene el ID del usuario soportando tanto objetos como dicts.
+    """
+    if not user:
+        return None
+    if isinstance(user, dict):
+        return str(user.get("id")) if user.get("id") else None
+    uid = getattr(user, "id", None)
+    return str(uid) if uid else None
 
 
 def _age_from_ymd(ymd: Optional[str]) -> Optional[int]:
@@ -921,7 +931,7 @@ async def open_epc_for_patient(
         "fecha_emision": None,
         "medico_responsable": None,
         "firmado_por_medico": False,
-        "created_by": str(getattr(user, "id", None)) if user else None,
+        "created_by": _actor_id(user),
         "created_by_name": _actor_name(user),  # ✅ Guardar nombre del usuario
         "created_at": _now(),
         "updated_at": _now(),
@@ -1796,7 +1806,7 @@ async def update_epc(
                 patient_id=patient_id,
                 estado=nuevo_estado_paciente,
                 observaciones=(
-                    f"Estado EPC '{nuevo_estado_epc}' seteado por {getattr(user, 'username', 'sistema')}"
+                    f"Estado EPC '{nuevo_estado_epc}' seteado por {_actor_name(user)}"
                 ),
             )
         except Exception as exc:
@@ -2453,7 +2463,7 @@ async def submit_section_feedback(
         "has_omissions": body.has_omissions if body.rating in ("partial", "bad") else None,
         "has_repetitions": body.has_repetitions if body.rating in ("partial", "bad") else None,
         "is_confusing": body.is_confusing if body.rating in ("partial", "bad") else None,
-        "created_by": str(getattr(user, "id", None)) if user else None,
+        "created_by": _actor_id(user),
         "created_by_name": _actor_name(user),
         "created_at": _now(),
         "status": "draft",  # draft hasta que se complete la evaluación
@@ -2463,7 +2473,7 @@ async def submit_section_feedback(
     archive_filter = {
         "epc_id": epc_id,
         "section": body.section,
-        "created_by": str(getattr(user, "id", None)),
+        "created_by": _actor_id(user),
     }
     old_docs = await mongo.epc_feedback.find(archive_filter).to_list(100)
     if old_docs:
@@ -2501,7 +2511,7 @@ async def complete_evaluation(
     como 'completed'. Solo se llama cuando el usuario hace click en
     'Guardar Evaluación' habiendo evaluado todas las secciones.
     """
-    user_id = str(getattr(user, "id", None)) if user else None
+    user_id = _actor_id(user)
     if not user_id:
         raise HTTPException(status_code=401, detail="No autenticado")
 
@@ -2545,7 +2555,7 @@ async def get_my_feedback(
         evaluated_at: fecha de la última evaluación
         has_previous: boolean indicando si hay evaluación previa
     """
-    user_id = str(getattr(user, "id", None)) if user else None
+    user_id = _actor_id(user)
     
     if not user_id:
         return {
@@ -2649,6 +2659,10 @@ async def get_feedback_stats(
     partial_count = next((t.get("count", 0) for t in totals if t["_id"] == "partial"), 0)
     bad_count = next((t.get("count", 0) for t in totals if t["_id"] == "bad"), 0)
     hce_bad_count = next((t.get("count", 0) for t in totals if t["_id"] == "hce_bad"), 0)
+
+    # Calcular usuarios unicos que han evaluado
+    unique_users = await mongo.epc_feedback.distinct("created_by_name", {"status": {"$in": ["completed", None]}})
+    total_users_count = len([u for u in unique_users if u])
 
     # Reestructurar by_section para frontend
     sections_data = {}
@@ -2837,6 +2851,7 @@ async def get_feedback_stats(
             "partial_pct": round((partial_count / total_count * 100) if total_count > 0 else 0, 1),
             "bad_pct": round((bad_count / total_count * 100) if total_count > 0 else 0, 1),
             "hce_bad_pct": round((hce_bad_count / total_count * 100) if total_count > 0 else 0, 1),
+            "total_users": total_users_count,
         },
         "by_section": sections_data,
         "questions_summary": {
